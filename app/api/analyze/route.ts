@@ -10,5 +10,5 @@ export async function POST(request: Request) {
   } catch {
     // Empty bodies use the default rolling window.
   }
-  return Response.json({ ok: true, ...runAnalysis(days) });
+  return Response.json({ ok: true, ...await runAnalysis(days) });
 }

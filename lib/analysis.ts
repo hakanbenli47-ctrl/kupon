@@ -1,6 +1,7 @@
 import "server-only";
 
 import { getDb, SqliteDb, withTransaction } from "./db";
+import { ensureSeedData } from "./seed";
 
 const MODEL_VERSION = "goal-poisson-1.1";
 const MARKETS = [1.5, 2.5, 3.5] as const;
@@ -66,17 +67,17 @@ function present(values: Array<number | null | undefined>) {
   return values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
 }
 
-function calibration(db: SqliteDb, competition: string, market: number, selection: string, raw: number) {
+async function calibration(db: SqliteDb, competition: string, market: number, selection: string, raw: number) {
   const low = Math.floor(raw * 10) / 10;
   const high = Math.min(1.001, low + 0.1);
-  const row = db.prepare(`
+  const row = await db.get(`
     SELECT COUNT(*) AS total,
            SUM(CASE WHEN p.outcome = 'WON' THEN 1 ELSE 0 END) AS wins
     FROM predictions p
     JOIN fixtures f ON f.id = p.fixture_id
     WHERE f.competition_code = ? AND p.market = ? AND p.selection = ?
       AND p.outcome IN ('WON','LOST') AND p.probability >= ? AND p.probability < ?
-  `).get(competition, market, selection, low, high) as { total?: number; wins?: number } | undefined;
+  `, [competition, market, selection, low, high]) as { total?: number; wins?: number } | undefined;
 
   const total = Number(row?.total || 0);
   const wins = Number(row?.wins || 0);
@@ -85,9 +86,9 @@ function calibration(db: SqliteDb, competition: string, market: number, selectio
   return clamp(raw * 0.45 + empirical * 0.55, 0.04, 0.96);
 }
 
-function recentMatches(db: SqliteDb, teamId: number, before: string, venue?: "HOME" | "AWAY") {
+async function recentMatches(db: SqliteDb, teamId: number, before: string, venue?: "HOME" | "AWAY") {
   const venueClause = venue === "HOME" ? "AND home_team_id = ?" : venue === "AWAY" ? "AND away_team_id = ?" : "";
-  return db.prepare(`
+  return await db.all(`
     SELECT f.id, f.home_team_id, f.away_team_id, f.home_goals, f.away_goals,
            ms.home_shots, ms.away_shots, ms.home_shots_on_target, ms.away_shots_on_target,
            ms.home_corners, ms.away_corners, ms.home_possession, ms.away_possession
@@ -96,18 +97,18 @@ function recentMatches(db: SqliteDb, teamId: number, before: string, venue?: "HO
       AND (f.home_team_id = ? OR f.away_team_id = ?)
       ${venueClause}
     ORDER BY f.kickoff_utc DESC LIMIT 5
-  `).all(before, teamId, teamId, ...(venue ? [teamId] : [])) as unknown as MatchRow[];
+  `, [before, teamId, teamId, ...(venue ? [teamId] : [])]) as unknown as MatchRow[];
 }
 
-function leagueBaseline(db: SqliteDb, competition: string, before: string) {
-  const row = db.prepare(`
+async function leagueBaseline(db: SqliteDb, competition: string, before: string) {
+  const row = await db.get(`
     SELECT AVG(home_goals) AS home_avg, AVG(away_goals) AS away_avg, COUNT(*) AS total
     FROM (
       SELECT home_goals, away_goals FROM fixtures
       WHERE competition_code = ? AND status = 'FINISHED' AND kickoff_utc < ?
       ORDER BY kickoff_utc DESC LIMIT 300
     )
-  `).get(competition, before) as { home_avg?: number; away_avg?: number; total?: number } | undefined;
+  `, [competition, before]) as { home_avg?: number; away_avg?: number; total?: number } | undefined;
   return {
     home: Number(row?.home_avg || 1.45),
     away: Number(row?.away_avg || 1.2),
@@ -115,27 +116,29 @@ function leagueBaseline(db: SqliteDb, competition: string, before: string) {
   };
 }
 
-function absenceAdjustment(db: SqliteDb, fixtureId: number, teamId: number) {
-  const row = db.prepare(`
+async function absenceAdjustment(db: SqliteDb, fixtureId: number, teamId: number) {
+  const row = await db.get(`
     SELECT COALESCE(SUM(attack_impact), 0) AS attack,
            COALESCE(SUM(defense_impact), 0) AS defense
     FROM player_availability
     WHERE fixture_id = ? AND team_id = ? AND availability IN ('OUT','SUSPENDED')
-  `).get(fixtureId, teamId) as { attack?: number; defense?: number } | undefined;
+  `, [fixtureId, teamId]) as { attack?: number; defense?: number } | undefined;
   return {
     attack: clamp(Number(row?.attack || 0), 0, 0.18),
     defense: clamp(Number(row?.defense || 0), 0, 0.18),
   };
 }
 
-function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
-  const homeRecent = recentMatches(db, fixture.home_team_id, fixture.kickoff_utc).slice(0, 5);
-  const awayRecent = recentMatches(db, fixture.away_team_id, fixture.kickoff_utc).slice(0, 5);
+async function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
+  const [homeRecent, awayRecent, homeVenue, awayVenue] = await Promise.all([
+    recentMatches(db, fixture.home_team_id, fixture.kickoff_utc),
+    recentMatches(db, fixture.away_team_id, fixture.kickoff_utc),
+    recentMatches(db, fixture.home_team_id, fixture.kickoff_utc, "HOME"),
+    recentMatches(db, fixture.away_team_id, fixture.kickoff_utc, "AWAY"),
+  ]);
   if (homeRecent.length < 5 || awayRecent.length < 5) return [];
 
-  const homeVenue = recentMatches(db, fixture.home_team_id, fixture.kickoff_utc, "HOME").slice(0, 5);
-  const awayVenue = recentMatches(db, fixture.away_team_id, fixture.kickoff_utc, "AWAY").slice(0, 5);
-  const h2h = db.prepare(`
+  const h2h = await db.all(`
     SELECT f.id, f.home_team_id, f.away_team_id, f.home_goals, f.away_goals,
            ms.home_shots, ms.away_shots, ms.home_shots_on_target, ms.away_shots_on_target,
            ms.home_corners, ms.away_corners, ms.home_possession, ms.away_possession
@@ -143,15 +146,15 @@ function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
     WHERE f.status = 'FINISHED' AND f.kickoff_utc < ?
       AND ((f.home_team_id = ? AND f.away_team_id = ?) OR (f.home_team_id = ? AND f.away_team_id = ?))
     ORDER BY f.kickoff_utc DESC
-  `).all(
+  `, [
     fixture.kickoff_utc,
     fixture.home_team_id,
     fixture.away_team_id,
     fixture.away_team_id,
     fixture.home_team_id,
-  ) as unknown as MatchRow[];
+  ]) as unknown as MatchRow[];
 
-  const baseline = leagueBaseline(db, fixture.competition_code, fixture.kickoff_utc);
+  const baseline = await leagueBaseline(db, fixture.competition_code, fixture.kickoff_utc);
   const hp = homeRecent.map((match) => teamPerspective(match, fixture.home_team_id));
   const ap = awayRecent.map((match) => teamPerspective(match, fixture.away_team_id));
   const hvp = homeVenue.map((match) => teamPerspective(match, fixture.home_team_id));
@@ -201,8 +204,10 @@ function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
     expectedAway *= ratio;
   }
 
-  const homeAbsence = absenceAdjustment(db, fixture.id, fixture.home_team_id);
-  const awayAbsence = absenceAdjustment(db, fixture.id, fixture.away_team_id);
+  const [homeAbsence, awayAbsence] = await Promise.all([
+    absenceAdjustment(db, fixture.id, fixture.home_team_id),
+    absenceAdjustment(db, fixture.id, fixture.away_team_id),
+  ]);
   expectedHome *= 1 - homeAbsence.attack + awayAbsence.defense;
   expectedAway *= 1 - awayAbsence.attack + homeAbsence.defense;
   expectedHome = clamp(expectedHome, 0.25, 3.4);
@@ -215,12 +220,12 @@ function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
     1,
   );
 
-  return MARKETS.map((market) => {
+  return Promise.all(MARKETS.map(async (market) => {
     const maxUnderGoals = Math.floor(market);
     const under = poissonCdf(maxUnderGoals, lambda);
     const rawProbability = Math.max(under, 1 - under);
     const selection = under >= 0.5 ? "ALT" : "UST";
-    const probability = calibration(db, fixture.competition_code, market, selection, rawProbability);
+    const probability = await calibration(db, fixture.competition_code, market, selection, rawProbability);
     return {
       market,
       selection,
@@ -251,35 +256,34 @@ function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
         stats_coverage: statsCoverage,
       },
     };
-  });
+  }));
 }
 
-function settlePredictions(db: SqliteDb) {
-  const rows = db.prepare(`
+async function settlePredictions(db: SqliteDb) {
+  const rows = await db.all(`
     SELECT p.id, p.market, p.selection, f.home_goals, f.away_goals
     FROM predictions p JOIN fixtures f ON f.id = p.fixture_id
     WHERE p.outcome IS NULL AND f.status = 'FINISHED'
       AND f.home_goals IS NOT NULL AND f.away_goals IS NOT NULL
-  `).all() as unknown as { id: number; market: number; selection: string; home_goals: number; away_goals: number }[];
+  `) as unknown as { id: number; market: number; selection: string; home_goals: number; away_goals: number }[];
 
-  const update = db.prepare("UPDATE predictions SET outcome = ?, settled_at = CURRENT_TIMESTAMP WHERE id = ?");
-  rows.forEach((row) => {
+  await Promise.all(rows.map((row) => {
     const total = row.home_goals + row.away_goals;
     const won = row.selection === "UST" ? total > row.market : total < row.market;
-    update.run(won ? "WON" : "LOST", row.id);
-  });
+    return db.run("UPDATE predictions SET outcome = ?, settled_at = CURRENT_TIMESTAMP WHERE id = ?", [won ? "WON" : "LOST", row.id]);
+  }));
   return rows.length;
 }
 
-function buildCoupons(db: SqliteDb, generatedFor: string) {
-  db.prepare("UPDATE coupons SET status = 'SUPERSEDED' WHERE generated_for = ? AND status = 'ACTIVE'").run(generatedFor);
-  const candidates = db.prepare(`
+async function buildCoupons(db: SqliteDb, generatedFor: string) {
+  await db.run("UPDATE coupons SET status = 'SUPERSEDED' WHERE generated_for = ? AND status = 'ACTIVE'", [generatedFor]);
+  const candidates = await db.all(`
     SELECT p.id, p.fixture_id, p.probability, p.data_quality, f.kickoff_utc
     FROM predictions p JOIN fixtures f ON f.id = p.fixture_id
     WHERE p.is_active = 1 AND p.outcome IS NULL AND f.status IN ('SCHEDULED','TIMED','TBC')
       AND date(f.kickoff_utc) = date(?) AND p.probability >= 0.72 AND p.data_quality >= 0.65
     ORDER BY p.probability DESC, p.data_quality DESC
-  `).all(generatedFor) as unknown as { id: number; fixture_id: number; probability: number }[];
+  `, [generatedFor]) as unknown as { id: number; fixture_id: number; probability: number }[];
 
   const unique: typeof candidates = [];
   const seen = new Set<number>();
@@ -291,27 +295,29 @@ function buildCoupons(db: SqliteDb, generatedFor: string) {
   }
 
   const groups = unique.length >= 8 ? [unique.slice(0, 5), unique.slice(5, 10)] : unique.length >= 4 ? [unique.slice(0, 5)] : [];
-  const insertCoupon = db.prepare(`
-    INSERT INTO coupons(generated_for, label, combined_probability, risk, status)
-    VALUES (?, ?, ?, ?, 'ACTIVE')
-  `);
-  const insertSelection = db.prepare("INSERT INTO coupon_selections(coupon_id, prediction_id, position) VALUES (?, ?, ?)");
-
-  groups.filter((group) => group.length >= 4).forEach((group, index) => {
+  for (const [index, group] of groups.filter((candidateGroup) => candidateGroup.length >= 4).entries()) {
     const combined = group.reduce((value, pick) => value * pick.probability, 1);
     const risk = combined >= 0.35 ? "DUSUK" : combined >= 0.2 ? "ORTA" : "YUKSEK";
-    const result = insertCoupon.run(generatedFor, `Kupon ${index + 1}`, combined, risk);
+    const result = await db.run(`
+      INSERT INTO coupons(generated_for, label, combined_probability, risk, status)
+      VALUES (?, ?, ?, ?, 'ACTIVE')
+    `, [generatedFor, `Kupon ${index + 1}`, combined, risk]);
     const couponId = Number(result.lastInsertRowid);
-    group.forEach((pick, position) => insertSelection.run(couponId, pick.id, position + 1));
-  });
+    await Promise.all(group.map((pick, position) => db.run(
+      "INSERT INTO coupon_selections(coupon_id, prediction_id, position) VALUES (?, ?, ?)",
+      [couponId, pick.id, position + 1],
+    )));
+  }
 
   return groups.filter((group) => group.length >= 4).length;
 }
 
-export function runAnalysis(days = 15) {
-  return withTransaction((db) => {
-    const settled = settlePredictions(db);
-    const fixtures = db.prepare(`
+export async function runAnalysis(days = 15) {
+  const bootstrapDb = await getDb();
+  await ensureSeedData(bootstrapDb);
+  return withTransaction(async (db) => {
+    const settled = await settlePredictions(db);
+    const fixtures = await db.all(`
       SELECT f.id, f.competition_code, f.kickoff_utc, f.home_team_id, f.away_team_id,
              ht.name AS home_team, at.name AS away_team
       FROM fixtures f
@@ -321,21 +327,19 @@ export function runAnalysis(days = 15) {
         AND datetime(f.kickoff_utc) >= datetime('now')
         AND datetime(f.kickoff_utc) < datetime('now', ?)
       ORDER BY f.kickoff_utc
-    `).all(`+${Math.max(1, Math.min(days, 31))} days`) as unknown as FixtureRow[];
+    `, [`+${Math.max(1, Math.min(days, 31))} days`]) as unknown as FixtureRow[];
 
-    const deactivate = db.prepare("UPDATE predictions SET is_active = 0 WHERE fixture_id = ? AND is_active = 1");
-    const insert = db.prepare(`
-      INSERT INTO predictions(
-        fixture_id, market, selection, raw_probability, probability, expected_total,
-        data_quality, sample_home, sample_away, sample_h2h, explanation_json, model_version, is_active
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-    `);
     let analyzed = 0;
-    fixtures.forEach((fixture) => {
-      const predictions = analyzeFixture(db, fixture);
-      deactivate.run(fixture.id);
-      if (!predictions.length) return;
-      predictions.forEach((prediction) => insert.run(
+    for (const fixture of fixtures) {
+      const predictions = await analyzeFixture(db, fixture);
+      await db.run("UPDATE predictions SET is_active = 0 WHERE fixture_id = ? AND is_active = 1", [fixture.id]);
+      if (!predictions.length) continue;
+      await Promise.all(predictions.map((prediction) => db.run(`
+        INSERT INTO predictions(
+          fixture_id, market, selection, raw_probability, probability, expected_total,
+          data_quality, sample_home, sample_away, sample_h2h, explanation_json, model_version, is_active
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+      `, [
         fixture.id,
         prediction.market,
         prediction.selection,
@@ -348,20 +352,21 @@ export function runAnalysis(days = 15) {
         prediction.sampleH2h,
         JSON.stringify(prediction.explanation),
         MODEL_VERSION,
-      ));
+      ])));
       analyzed += 1;
-    });
+    }
 
     const dates = [...new Set(fixtures.map((fixture) => fixture.kickoff_utc.slice(0, 10)))];
     let coupons = 0;
-    dates.forEach((date) => { coupons += buildCoupons(db, date); });
+    for (const date of dates) coupons += await buildCoupons(db, date);
     return { analyzed, settled, coupons, fixturesInWindow: fixtures.length, modelVersion: MODEL_VERSION };
   });
 }
 
-export function getDashboard(days = 15) {
-  const db = getDb();
-  const fixtures = db.prepare(`
+export async function getDashboard(days = 15) {
+  const db = await getDb();
+  await ensureSeedData(db);
+  const fixtures = await db.all(`
     SELECT f.id, f.external_id, f.kickoff_utc, f.status, f.home_goals, f.away_goals,
            c.code AS competition_code, c.name AS competition,
            ht.name AS home_team, at.name AS away_team,
@@ -373,13 +378,13 @@ export function getDashboard(days = 15) {
     WHERE datetime(f.kickoff_utc) >= datetime('now', '-1 day')
       AND datetime(f.kickoff_utc) < datetime('now', ?)
     ORDER BY f.kickoff_utc
-  `).all(`+${Math.max(1, Math.min(days, 31))} days`);
+  `, [`+${Math.max(1, Math.min(days, 31))} days`]);
 
-  const predictionRows = db.prepare(`
+  const predictionRows = await db.all(`
     SELECT p.*, f.competition_code FROM predictions p
     JOIN fixtures f ON f.id = p.fixture_id
     WHERE p.is_active = 1
-  `).all();
+  `);
   const predictions = new Map<number, Record<string, unknown>[]>();
   predictionRows.forEach((row) => {
     const fixtureId = Number(row.fixture_id);
@@ -391,7 +396,7 @@ export function getDashboard(days = 15) {
     predictions: predictions.get(Number(fixture.id)) || [],
   }));
 
-  const couponRows = db.prepare(`
+  const couponRows = await db.all(`
     SELECT c.id, c.generated_for, c.label, c.combined_probability, c.risk, c.status, c.created_at,
            cs.position, p.market, p.selection, p.probability,
            f.kickoff_utc, ht.name AS home_team, at.name AS away_team,
@@ -405,7 +410,7 @@ export function getDashboard(days = 15) {
     JOIN competitions comp ON comp.code = f.competition_code
     WHERE c.status = 'ACTIVE'
     ORDER BY c.generated_for, c.id, cs.position
-  `).all();
+  `);
 
   const couponMap = new Map<number, Record<string, unknown>>();
   couponRows.forEach((row) => {
@@ -433,12 +438,12 @@ export function getDashboard(days = 15) {
     couponMap.set(id, existing);
   });
 
-  const metrics = db.prepare(`
+  const metrics = await db.get(`
     SELECT COUNT(*) AS settled,
            SUM(CASE WHEN outcome = 'WON' THEN 1 ELSE 0 END) AS won
     FROM predictions WHERE outcome IN ('WON','LOST')
-  `).get() || { settled: 0, won: 0 };
-  const lastSync = db.prepare("SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1").get() || null;
+  `) || { settled: 0, won: 0 };
+  const lastSync = await db.get("SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1") || null;
   const upcomingCount = enriched.filter((fixture) => ["SCHEDULED", "TIMED", "TBC"].includes(String(fixture["status"]))).length;
   const analyzedCount = enriched.filter((fixture) => fixture.predictions.length > 0).length;
 

@@ -28,6 +28,7 @@
 /data/kupon.db-wal
 /data/backups/
 /data/imports/*.generated.json
+!/data/imports/uefa-2026-07-22.generated.json
 
 # debug
 npm-debug.log*
