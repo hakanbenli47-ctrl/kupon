@@ -29,6 +29,8 @@
 /data/backups/
 /data/imports/*.generated.json
 !/data/imports/uefa-2026-07-22.generated.json
+!/data/imports/uefa-2025-26-history.generated.json
+!/data/imports/domestic-2025-26-history.generated.json
 
 # debug
 npm-debug.log*

@@ -1,4 +1,6 @@
-import seed from "@/data/imports/uefa-2026-07-22.generated.json";
+import currentSeed from "@/data/imports/uefa-2026-07-22.generated.json";
+import historySeed from "@/data/imports/uefa-2025-26-history.generated.json";
+import domesticSeed from "@/data/imports/domestic-2025-26-history.generated.json";
 import type { SqliteDb } from "./db";
 
 let seeding: Promise<void> | null = null;
@@ -13,9 +15,19 @@ export async function ensureSeedData(db: SqliteDb) {
   if (!seeding) {
     seeding = (async () => {
       const count = await db.get("SELECT COUNT(*) AS total FROM fixtures") as { total?: number } | undefined;
-      if (Number(count?.total || 0) > 0) return;
+      const historyCount = await db.get("SELECT COUNT(*) AS total FROM fixtures WHERE external_id LIKE 'uefa-history-%'") as { total?: number } | undefined;
+      const domesticCount = await db.get("SELECT COUNT(*) AS total FROM fixtures WHERE external_id LIKE 'openfootball-%'") as { total?: number } | undefined;
+      const fixtures = [
+        ...(Number(count?.total || 0) === 0 ? currentSeed.fixtures : []),
+        ...(Number(historyCount?.total || 0) < historySeed.fixtures.length ? historySeed.fixtures : []),
+        ...(Number(domesticCount?.total || 0) < domesticSeed.fixtures.length ? domesticSeed.fixtures : []),
+      ];
+      if (!fixtures.length) return;
 
-      const fixtures = seed.fixtures;
+      await db.batch(domesticSeed.competitions.map((competition) => ({
+        sql: "INSERT OR IGNORE INTO competitions(code, name, country) VALUES (?, ?, ?)",
+        args: [competition.code, competition.name, competition.country],
+      })));
       const teamNames = [...new Set(fixtures.flatMap((fixture) => [fixture.home_team, fixture.away_team]))];
       for (const group of chunks(teamNames, 80)) {
         await db.batch(group.map((name) => ({
@@ -64,7 +76,7 @@ export async function ensureSeedData(db: SqliteDb) {
       await db.run(`
         INSERT INTO sync_runs(started_at, finished_at, status, fixtures_added, fixtures_updated, sources_checked, notes)
         VALUES (?, ?, 'SUCCESS', ?, 0, ?, ?)
-      `, [now, now, fixtures.length, fixtures.length, "İlk Turso veri yüklemesi"]);
+      `, [now, now, fixtures.length, fixtures.length, "UEFA ve ulusal lig 2025/26 geçmiş veri yüklemesi"]);
     })().catch((error) => {
       seeding = null;
       throw error;

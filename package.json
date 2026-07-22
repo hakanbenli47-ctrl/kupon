@@ -8,6 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "data:update": "node scripts/update-uefa.mjs",
+    "data:history": "node scripts/import-uefa-history.mjs",
+    "data:domestic": "node scripts/import-domestic-history.mjs",
     "db:backup": "node scripts/backup-db.mjs"
   },
   "dependencies": {
