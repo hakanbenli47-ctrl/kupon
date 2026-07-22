@@ -1,0 +1,55 @@
+⨯ Error: Cannot find module 'node:sqlite': Unsupported external type Url for commonjs reference
+    at <unknown> (C:\projeler\kupon\.next\dev\server\chunks\[root-of-the-server]__1cdp0wm._.js:77:19)
+    at getDb (C:\projeler\kupon\.next\dev\server\chunks\[root-of-the-server]__1cdp0wm._.js:80:7)
+    at getDashboard (lib\analysis.ts:357:19)
+    at GET (app\api\dashboard\route.ts:9:36)
+  355 |
+  356 | export function getDashboard(days = 15) {
+> 357 |   const db = getDb();
+      |                   ^
+  358 |   const fixtures = db.prepare(`
+  359 |     SELECT f.id, f.external_id, f.kickoff_utc, f.status, f.home_goals, f.away_goals,
+  360 |            c.code AS competition_code, c.name AS competition, {
+  code: 'MODULE_NOT_FOUND'
+}
+⨯ Error: Cannot find module 'node:sqlite': Unsupported external type Url for commonjs reference
+    at <unknown> (C:\projeler\kupon\.next\dev\server\chunks\[root-of-the-server]__1cdp0wm._.js:77:19)
+    at getDb (C:\projeler\kupon\.next\dev\server\chunks\[root-of-the-server]__1cdp0wm._.js:80:7)
+    at withTransaction (lib\db.ts:40:14)
+    at runAnalysis (lib\analysis.ts:306:25)
+    at POST (app\api\analyze\route.ts:13:50)
+  38 |
+  39 | export function withTransaction<T>(work: (db: SqliteDb) => T): T {
+> 40 |   const db = getDb();
+     |              ^
+  41 |   db.exec("BEGIN IMMEDIATE");
+  42 |   try {
+  43 |     const value = work(db); {
+  code: 'MODULE_NOT_FOUND'
+}
+(node:10528) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[browser] The final argument passed to useEffect changed size between renders. The order and size of this array must remain constant.
+
+Previous: [async ()=>{
+            try {
+                const response = await fetch("/api/dashboard?days=15", {
+                    cache: "no-store"
+                });
+                if (!response.ok) throw new Error("Panel verisi alınamadı.");
+                setData(await response.json());
+                setError("");
+            } catch (loadError) {
+                setError(loadError instanceof Error ? loadError.message : "Beklenmeyen bir hata oluştu.");
+            }
+        }]
+Incoming: [] 
+    at Dashboard (app/dashboard.tsx:113:12)
+    at Set.forEach (<anonymous>)
+  111 |   }, []);
+  112 |
+> 113 |   useEffect(() => {
+      |            ^
+  114 |     let active = true;
+  115 |     fetch("/api/dashboard?days=15", { cache: "no-store" })
+  116 |       .then((response) => { (app/dashboard.tsx:113:12)

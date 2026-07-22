@@ -1,0 +1,29 @@
+{
+  "fixtures": [
+    {
+      "external_id": "resmi-kaynakta-sabit-mac-kimligi",
+      "competition_code": "PL",
+      "season": "2026-2027",
+      "stage": "1. Hafta",
+      "kickoff_utc": "2026-08-15T14:00:00Z",
+      "home_team": "Örnek Ev Takımı",
+      "away_team": "Örnek Deplasman Takımı",
+      "status": "TIMED",
+      "source_name": "Resmî lig sitesi",
+      "source_url": "https://example.com/official-fixture",
+      "source_checked_at": "2026-07-22T18:14:00Z",
+      "stats": {
+        "home_shots": 14,
+        "away_shots": 9,
+        "home_shots_on_target": 6,
+        "away_shots_on_target": 3,
+        "home_corners": 7,
+        "away_corners": 4,
+        "home_possession": 56.2,
+        "away_possession": 43.8,
+        "source_url": "https://example.com/official-match-stats"
+      },
+      "player_availability": []
+    }
+  ]
+}
