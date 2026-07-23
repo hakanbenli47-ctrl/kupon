@@ -42,6 +42,32 @@ type ProviderResult = {
   stats?: Record<string, number | null>;
 };
 
+type UefaTeam = {
+  id?: string | number;
+  internationalName?: string;
+  countryCode?: string;
+};
+
+type UefaMatch = {
+  id?: string | number;
+  status?: string;
+  competition?: { code?: string };
+  kickOffTime?: { dateTime?: string };
+  homeTeam?: UefaTeam;
+  awayTeam?: UefaTeam;
+  score?: { regular?: { home?: number; away?: number } };
+  playerEvents?: {
+    scorers?: Array<{
+      id?: string;
+      teamId?: string | number;
+      phase?: string;
+      time?: { minute?: number; injuryMinute?: number };
+      goalType?: string;
+      player?: { internationalName?: string };
+    }>;
+  };
+};
+
 const STAT_COLUMNS = [
   "home_shots", "away_shots", "home_shots_on_target", "away_shots_on_target",
   "home_corners", "away_corners", "home_possession", "away_possession",
@@ -84,6 +110,23 @@ async function fetchJson(url: string, timeoutMs = 8_000) {
   });
   if (!response.ok) throw new Error(`${new URL(url).hostname}: HTTP ${response.status}`);
   return response.json() as Promise<unknown>;
+}
+
+function uefaCompetitionCode(value: unknown) {
+  const code = String(value || "").toUpperCase();
+  if (["UCL", "CL"].includes(code)) return "CL";
+  if (["UEL", "EL"].includes(code)) return "EL";
+  if (["UECL", "ECL"].includes(code)) return "ECL";
+  return null;
+}
+
+function uefaSourceUrl(code: string, matchId: string | number) {
+  const slug = code === "CL"
+    ? "uefachampionsleague"
+    : code === "EL"
+      ? "uefaeuropaleague"
+      : "uefaconferenceleague";
+  return `https://www.uefa.com/${slug}/match/${matchId}/`;
 }
 
 function numeric(value: unknown) {
@@ -349,6 +392,310 @@ async function persistResult(db: SqliteDb, fixture: SyncFixture, result: Provide
   }
 }
 
+async function providerTeamId(
+  db: SqliteDb,
+  provider: string,
+  team: UefaTeam,
+  sourceUrl: string,
+  preferredTeamId?: number,
+) {
+  const externalId = String(team.id || "");
+  const name = String(team.internationalName || "").trim();
+  if (!externalId || !name) throw new Error("UEFA takım kimliği veya adı eksik.");
+  const linked = await db.get(`
+    SELECT team_id FROM team_provider_ids WHERE provider = ? AND external_id = ?
+  `, [provider, externalId]) as { team_id?: number } | undefined;
+  if (linked?.team_id) return Number(linked.team_id);
+
+  let teamId = preferredTeamId;
+  if (!teamId) {
+    const existing = await db.get("SELECT id FROM teams WHERE name = ?", [name]) as { id?: number } | undefined;
+    if (existing?.id) {
+      teamId = Number(existing.id);
+    } else {
+      const inserted = await db.run("INSERT INTO teams(name, country) VALUES (?, ?)", [
+        name,
+        team.countryCode || null,
+      ]);
+      teamId = Number(inserted.lastInsertRowid);
+    }
+  }
+  await db.run(`
+    INSERT INTO team_provider_ids(provider, external_id, team_id, source_url, checked_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(provider, external_id) DO UPDATE SET
+      team_id=excluded.team_id, source_url=excluded.source_url, checked_at=excluded.checked_at
+  `, [provider, externalId, teamId, sourceUrl, new Date().toISOString()]);
+  return teamId;
+}
+
+function embeddedUefaGoals(
+  match: UefaMatch,
+  homeDbId: number,
+  awayDbId: number,
+  flipOwnGoals: boolean,
+): NormalizedGoal[] {
+  const homeUefaId = String(match.homeTeam?.id || "");
+  const awayUefaId = String(match.awayTeam?.id || "");
+  const scorers = Array.isArray(match.playerEvents?.scorers) ? match.playerEvents.scorers : [];
+  return scorers
+    .filter((goal) => ["FIRST_HALF", "SECOND_HALF"].includes(String(goal.phase || "")))
+    .map((goal, index) => {
+      let teamId = String(goal.teamId || "");
+      const ownGoal = String(goal.goalType || "").toUpperCase() === "OWN";
+      if (flipOwnGoals && ownGoal) teamId = teamId === homeUefaId ? awayUefaId : homeUefaId;
+      const scoringTeamId = teamId === homeUefaId ? homeDbId : teamId === awayUefaId ? awayDbId : 0;
+      return {
+        sourceEventId: String(goal.id || `uefa-${match.id}-goal-${index + 1}`),
+        scoringTeamId,
+        minute: Number(goal.time?.minute || 0),
+        addedTime: Number(goal.time?.injuryMinute || 0),
+        period: goal.phase ? String(goal.phase) : null,
+        playerName: goal.player?.internationalName ? String(goal.player.internationalName) : null,
+        ownGoal,
+        penalty: String(goal.goalType || "").toUpperCase() === "PENALTY",
+      };
+    })
+    .filter((goal) =>
+      goal.scoringTeamId > 0
+      && Number.isInteger(goal.minute)
+      && goal.minute >= 1
+      && goal.minute <= 130
+      && Number.isInteger(goal.addedTime)
+      && goal.addedTime >= 0
+      && goal.addedTime <= 30);
+}
+
+async function importUefaHistoryMatch(db: SqliteDb, match: UefaMatch) {
+  const matchId = String(match.id || "");
+  const competitionCode = uefaCompetitionCode(match.competition?.code);
+  const kickoff = new Date(String(match.kickOffTime?.dateTime || ""));
+  const homeGoals = numeric(match.score?.regular?.home);
+  const awayGoals = numeric(match.score?.regular?.away);
+  if (!matchId || !competitionCode || match.status !== "FINISHED"
+    || Number.isNaN(kickoff.getTime()) || homeGoals === null || awayGoals === null
+    || !match.homeTeam || !match.awayTeam) return null;
+
+  const sourceUrl = uefaSourceUrl(competitionCode, matchId);
+  const [homeTeamId, awayTeamId] = await Promise.all([
+    providerTeamId(db, "UEFA", match.homeTeam, sourceUrl),
+    providerTeamId(db, "UEFA", match.awayTeam, sourceUrl),
+  ]);
+  const existing = await db.get(`
+    SELECT id, external_id FROM fixtures
+    WHERE external_id IN (?, ?)
+    ORDER BY CASE WHEN external_id = ? THEN 0 ELSE 1 END
+    LIMIT 1
+  `, [
+    `uefa-${competitionCode}-${matchId}`,
+    `uefa-history-${competitionCode}-${matchId}`,
+    `uefa-${competitionCode}-${matchId}`,
+  ]) as { id?: number; external_id?: string } | undefined;
+  const externalId = String(existing?.external_id || `uefa-history-${competitionCode}-${matchId}`);
+  const checkedAt = new Date().toISOString();
+  await db.run(`
+    INSERT INTO fixtures(
+      external_id, competition_code, kickoff_utc, home_team_id, away_team_id,
+      status, home_goals, away_goals, stage, source_name, source_url, source_checked_at
+    ) VALUES (?, ?, ?, ?, ?, 'FINISHED', ?, ?, ?, 'UEFA Team Match History', ?, ?)
+    ON CONFLICT(external_id) DO UPDATE SET
+      kickoff_utc=excluded.kickoff_utc,
+      status=CASE WHEN EXISTS (
+        SELECT 1 FROM manual_fixture_results mr WHERE mr.fixture_id=fixtures.id
+      ) THEN fixtures.status ELSE 'FINISHED' END,
+      home_goals=CASE WHEN EXISTS (
+        SELECT 1 FROM manual_fixture_results mr WHERE mr.fixture_id=fixtures.id
+      ) THEN fixtures.home_goals ELSE excluded.home_goals END,
+      away_goals=CASE WHEN EXISTS (
+        SELECT 1 FROM manual_fixture_results mr WHERE mr.fixture_id=fixtures.id
+      ) THEN fixtures.away_goals ELSE excluded.away_goals END,
+      source_name=excluded.source_name, source_url=excluded.source_url,
+      source_checked_at=excluded.source_checked_at, updated_at=CURRENT_TIMESTAMP
+  `, [
+    externalId,
+    competitionCode,
+    kickoff.toISOString(),
+    homeTeamId,
+    awayTeamId,
+    Number(homeGoals),
+    Number(awayGoals),
+    "UEFA takım geçmişi",
+    sourceUrl,
+    checkedAt,
+  ]);
+  const fixtureRow = await db.get("SELECT id FROM fixtures WHERE external_id = ?", [externalId]) as { id?: number };
+  const fixtureId = Number(fixtureRow.id);
+  const candidates = [
+    embeddedUefaGoals(match, homeTeamId, awayTeamId, false),
+    embeddedUefaGoals(match, homeTeamId, awayTeamId, true),
+  ];
+  const goals = candidates.find((items) =>
+    items.filter((goal) => goal.scoringTeamId === homeTeamId).length === homeGoals
+    && items.filter((goal) => goal.scoringTeamId === awayTeamId).length === awayGoals);
+  let completeGoalSet = false;
+  if (goals) {
+    await db.run("DELETE FROM goal_events WHERE fixture_id = ?", [fixtureId]);
+    for (const goal of goals) {
+      await db.run(`
+        INSERT INTO goal_events(
+          fixture_id, source_event_id, scoring_team_id, minute, added_time, period,
+          player_name, event_type, is_own_goal, is_penalty, source_url, checked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'GOAL', ?, ?, ?, ?)
+      `, [
+        fixtureId, goal.sourceEventId, goal.scoringTeamId, goal.minute, goal.addedTime,
+        goal.period, goal.playerName, goal.ownGoal ? 1 : 0, goal.penalty ? 1 : 0,
+        sourceUrl, checkedAt,
+      ]);
+    }
+    await db.run(`
+      INSERT INTO goal_event_sets(fixture_id, event_count, is_complete, source_name, source_url, checked_at)
+      VALUES (?, ?, 1, 'UEFA Team Match History', ?, ?)
+      ON CONFLICT(fixture_id) DO UPDATE SET event_count=excluded.event_count, is_complete=1,
+        source_name=excluded.source_name, source_url=excluded.source_url, checked_at=excluded.checked_at
+    `, [fixtureId, goals.length, sourceUrl, checkedAt]);
+    completeGoalSet = true;
+  }
+  return { fixtureId, completeGoalSet };
+}
+
+async function backfillUefaFixture(db: SqliteDb, fixture: SyncFixture) {
+  const matchId = fixture.source_url.match(/\/match\/(\d+)/)?.[1]
+    || fixture.external_id.match(/uefa-(?:history-)?[A-Z]+-(\d+)/)?.[1];
+  if (!matchId) throw new Error("UEFA maç kimliği bulunamadı.");
+  const sourceUrl = fixture.source_url;
+  const raw = await fetchJson(`https://match.uefa.com/v5/matches?matchId=${matchId}`);
+  const match = Array.isArray(raw) ? raw[0] as UefaMatch : null;
+  if (!match?.homeTeam || !match.awayTeam
+    || !teamsMatch(fixture.home_team, match.homeTeam.internationalName)
+    || !teamsMatch(fixture.away_team, match.awayTeam.internationalName)) {
+    throw new Error("UEFA takım eşleşmesi doğrulanamadı.");
+  }
+  await Promise.all([
+    providerTeamId(db, "UEFA", match.homeTeam, sourceUrl, fixture.home_team_id),
+    providerTeamId(db, "UEFA", match.awayTeam, sourceUrl, fixture.away_team_id),
+  ]);
+  const kickoffMs = new Date(fixture.kickoff_utc).getTime();
+  const teamIds = [String(match.homeTeam.id), String(match.awayTeam.id)];
+  const historyResponses = await Promise.all(teamIds.map((teamId) =>
+    fetchJson(`https://match.uefa.com/v5/matches?teamId=${encodeURIComponent(teamId)}&order=DESC&limit=20&offset=0`)));
+  const histories = historyResponses.map((response) =>
+    (Array.isArray(response) ? response as UefaMatch[] : [])
+      .filter((item) =>
+        item.status === "FINISHED"
+        && new Date(String(item.kickOffTime?.dateTime || "")).getTime() < kickoffMs
+        && Boolean(uefaCompetitionCode(item.competition?.code)))
+      .sort((left, right) =>
+        new Date(String(right.kickOffTime?.dateTime || "")).getTime()
+        - new Date(String(left.kickOffTime?.dateTime || "")).getTime())
+      .slice(0, 5));
+  const uniqueMatches = new Map<string, UefaMatch>();
+  for (const history of histories) {
+    for (const item of history) if (item.id) uniqueMatches.set(String(item.id), item);
+  }
+  let matchesUpserted = 0;
+  let completeGoalSets = 0;
+  for (const historyMatch of uniqueMatches.values()) {
+    const result = await importUefaHistoryMatch(db, historyMatch);
+    if (!result) continue;
+    matchesUpserted += 1;
+    if (result.completeGoalSet) completeGoalSets += 1;
+  }
+  return {
+    teamsChecked: teamIds.length,
+    matchesUpserted,
+    completeGoalSets,
+    enoughHistory: histories.every((history) => history.length >= 5),
+    historyCounts: histories.map((history) => history.length),
+  };
+}
+
+export async function runUefaHistoryBackfill(batchSize = 6, analyzeWhenDone = false) {
+  const db = await getDb();
+  await ensureSeedData(db);
+  const limit = Math.max(1, Math.min(8, Math.floor(batchSize)));
+  const fixtures = await db.all(`
+    SELECT f.id, f.external_id, f.competition_code, f.kickoff_utc, f.status,
+           f.home_goals, f.away_goals, f.home_team_id, f.away_team_id,
+           ht.name AS home_team, at.name AS away_team, f.source_url,
+           CASE WHEN mr.fixture_id IS NULL THEN 0 ELSE 1 END AS has_manual_result,
+           CASE WHEN ges.is_complete = 1 THEN 1 ELSE 0 END AS has_complete_goals
+    FROM fixtures f
+    JOIN teams ht ON ht.id = f.home_team_id
+    JOIN teams at ON at.id = f.away_team_id
+    LEFT JOIN manual_fixture_results mr ON mr.fixture_id = f.id
+    LEFT JOIN goal_event_sets ges ON ges.fixture_id = f.id
+    LEFT JOIN fixture_history_backfill fhb ON fhb.fixture_id = f.id AND fhb.provider = 'UEFA'
+    WHERE f.competition_code IN ('CL','EL','ECL')
+      AND date(datetime(f.kickoff_utc, '+3 hours')) = date(datetime('now', '+3 hours'))
+      AND (fhb.fixture_id IS NULL OR (fhb.status <> 'SUCCESS' AND fhb.attempts < 3))
+    ORDER BY f.kickoff_utc, f.id
+    LIMIT ?
+  `, [limit]) as unknown as SyncFixture[];
+
+  let fixturesCompleted = 0;
+  let teamsChecked = 0;
+  let matchesUpserted = 0;
+  let completeGoalSets = 0;
+  const errors: string[] = [];
+  for (const fixture of fixtures) {
+    const checkedAt = new Date().toISOString();
+    try {
+      const result = await backfillUefaFixture(db, fixture);
+      teamsChecked += result.teamsChecked;
+      matchesUpserted += result.matchesUpserted;
+      completeGoalSets += result.completeGoalSets;
+      const status = result.enoughHistory ? "SUCCESS" : "PARTIAL";
+      if (status === "SUCCESS") fixturesCompleted += 1;
+      await db.run(`
+        INSERT INTO fixture_history_backfill(
+          fixture_id, provider, status, attempts, teams_checked,
+          matches_upserted, complete_goal_sets, checked_at, notes
+        ) VALUES (?, 'UEFA', ?, 1, ?, ?, ?, ?, ?)
+        ON CONFLICT(fixture_id, provider) DO UPDATE SET
+          status=excluded.status, attempts=fixture_history_backfill.attempts + 1,
+          teams_checked=excluded.teams_checked, matches_upserted=excluded.matches_upserted,
+          complete_goal_sets=excluded.complete_goal_sets, checked_at=excluded.checked_at,
+          notes=excluded.notes
+      `, [
+        fixture.id, status, result.teamsChecked, result.matchesUpserted,
+        result.completeGoalSets, checkedAt, JSON.stringify({ historyCounts: result.historyCounts }),
+      ]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${fixture.home_team} - ${fixture.away_team}: ${message}`.slice(0, 240));
+      await db.run(`
+        INSERT INTO fixture_history_backfill(
+          fixture_id, provider, status, attempts, checked_at, notes
+        ) VALUES (?, 'UEFA', 'FAILED', 1, ?, ?)
+        ON CONFLICT(fixture_id, provider) DO UPDATE SET
+          status='FAILED', attempts=fixture_history_backfill.attempts + 1,
+          checked_at=excluded.checked_at, notes=excluded.notes
+      `, [fixture.id, checkedAt, message.slice(0, 500)]);
+    }
+  }
+  const remainingRow = await db.get(`
+    SELECT COUNT(*) AS total
+    FROM fixtures f
+    LEFT JOIN fixture_history_backfill fhb ON fhb.fixture_id=f.id AND fhb.provider='UEFA'
+    WHERE f.competition_code IN ('CL','EL','ECL')
+      AND date(datetime(f.kickoff_utc, '+3 hours')) = date(datetime('now', '+3 hours'))
+      AND (fhb.fixture_id IS NULL OR (fhb.status <> 'SUCCESS' AND fhb.attempts < 3))
+  `) as { total?: number } | undefined;
+  const remaining = Number(remainingRow?.total || 0);
+  const analysis = analyzeWhenDone ? await runAnalysis(2) : null;
+  return {
+    ok: true,
+    batchFixtures: fixtures.length,
+    fixturesCompleted,
+    teamsChecked,
+    matchesUpserted,
+    completeGoalSets,
+    remaining,
+    errors,
+    analysis,
+  };
+}
+
 export async function runDailyCloudSync() {
   const db = await getDb();
   await ensureSeedData(db);
@@ -450,11 +797,22 @@ export async function runDailyCloudSync() {
         }
       }
     }
+    const historyBackfill = await runUefaHistoryBackfill(2, false).catch((error) => ({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    }));
     // Günlük çalışmada bugünün ve yarının kuponlarını güncelle; 31 günlük
     // kapsamlı yeniden hesaplama periyodik bakımda yapılır.
     const analysis = await runAnalysis(2);
     const status = errors.length && !updated ? "PARTIAL" : "SUCCESS";
-    const notes = JSON.stringify({ checked, updated, completeGoalSets, errors: errors.slice(0, 6), analysis });
+    const notes = JSON.stringify({
+      checked,
+      updated,
+      completeGoalSets,
+      errors: errors.slice(0, 6),
+      historyBackfill,
+      analysis,
+    });
     await db.run(`
       UPDATE sync_runs SET finished_at = ?, status = ?, fixtures_updated = ?,
         sources_checked = ?, notes = ? WHERE id = ?
@@ -462,7 +820,16 @@ export async function runDailyCloudSync() {
     await db.run(`
       UPDATE cloud_sync_locks SET finished_at = ?, status = ?, notes = ? WHERE run_key = ?
     `, [new Date().toISOString(), status, notes, runKey]);
-    return { ok: true, runKey, checked, updated, completeGoalSets, errors: errors.slice(0, 6), analysis };
+    return {
+      ok: true,
+      runKey,
+      checked,
+      updated,
+      completeGoalSets,
+      historyBackfill,
+      errors: errors.slice(0, 6),
+      analysis,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error("Günlük bulut güncellemesi başarısız:", error);

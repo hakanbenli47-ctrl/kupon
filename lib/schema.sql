@@ -38,6 +38,17 @@ CREATE INDEX IF NOT EXISTS idx_fixtures_kickoff ON fixtures(kickoff_utc);
 CREATE INDEX IF NOT EXISTS idx_fixtures_home ON fixtures(home_team_id, kickoff_utc);
 CREATE INDEX IF NOT EXISTS idx_fixtures_away ON fixtures(away_team_id, kickoff_utc);
 
+CREATE TABLE IF NOT EXISTS team_provider_ids (
+  provider TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  source_url TEXT NOT NULL,
+  checked_at TEXT NOT NULL,
+  PRIMARY KEY(provider, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_provider_ids_team ON team_provider_ids(team_id, provider);
+
 CREATE TABLE IF NOT EXISTS match_stats (
   fixture_id INTEGER PRIMARY KEY REFERENCES fixtures(id) ON DELETE CASCADE,
   home_shots INTEGER,
@@ -212,6 +223,20 @@ CREATE TABLE IF NOT EXISTS cloud_sync_locks (
   status TEXT NOT NULL,
   notes TEXT,
   CHECK (status IN ('RUNNING','SUCCESS','PARTIAL','FAILED'))
+);
+
+CREATE TABLE IF NOT EXISTS fixture_history_backfill (
+  fixture_id INTEGER NOT NULL REFERENCES fixtures(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 1,
+  teams_checked INTEGER NOT NULL DEFAULT 0,
+  matches_upserted INTEGER NOT NULL DEFAULT 0,
+  complete_goal_sets INTEGER NOT NULL DEFAULT 0,
+  checked_at TEXT NOT NULL,
+  notes TEXT,
+  PRIMARY KEY(fixture_id, provider),
+  CHECK (status IN ('SUCCESS','PARTIAL','FAILED'))
 );
 
 INSERT OR IGNORE INTO competitions(code, name, country) VALUES
