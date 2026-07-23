@@ -153,6 +153,7 @@ function mapUefaStats(raw: unknown, homeUefaId: string, awayUefaId: string) {
   const aliases: Record<string, string> = {
     totalattempts: "shots",
     attempts: "shots",
+    attemptsontarget: "shots_on_target",
     shotstotal: "shots",
     shotstarget: "shots_on_target",
     shotson: "shots_on_target",
@@ -344,6 +345,22 @@ async function syncFromTheSportsDb(fixture: SyncFixture): Promise<ProviderResult
   return result;
 }
 
+async function upsertMatchStats(
+  db: SqliteDb,
+  fixtureId: number,
+  stats: Record<string, number | null>,
+  sourceUrl: string,
+  checkedAt: string,
+) {
+  const values = STAT_COLUMNS.map((column) => stats[column] ?? null);
+  const assignments = STAT_COLUMNS.map((column) => `${column}=excluded.${column}`).join(",");
+  await db.run(`
+      INSERT INTO match_stats(fixture_id, ${STAT_COLUMNS.join(",")}, source_url, checked_at)
+      VALUES (?, ${STAT_COLUMNS.map(() => "?").join(",")}, ?, ?)
+      ON CONFLICT(fixture_id) DO UPDATE SET ${assignments}, source_url=excluded.source_url, checked_at=excluded.checked_at
+  `, [fixtureId, ...values, sourceUrl, checkedAt]);
+}
+
 async function persistResult(db: SqliteDb, fixture: SyncFixture, result: ProviderResult) {
   const checkedAt = new Date().toISOString();
   if (!fixture.has_manual_result && result.status) {
@@ -367,13 +384,7 @@ async function persistResult(db: SqliteDb, fixture: SyncFixture, result: Provide
     `, fixtureArgs);
   }
   if (result.stats && Object.keys(result.stats).length) {
-    const values = STAT_COLUMNS.map((column) => result.stats?.[column] ?? null);
-    const assignments = STAT_COLUMNS.map((column) => `${column}=excluded.${column}`).join(",");
-    await db.run(`
-      INSERT INTO match_stats(fixture_id, ${STAT_COLUMNS.join(",")}, source_url, checked_at)
-      VALUES (?, ${STAT_COLUMNS.map(() => "?").join(",")}, ?, ?)
-      ON CONFLICT(fixture_id) DO UPDATE SET ${assignments}, source_url=excluded.source_url, checked_at=excluded.checked_at
-    `, [fixture.id, ...values, result.sourceUrl, checkedAt]);
+    await upsertMatchStats(db, fixture.id, result.stats, result.sourceUrl, checkedAt);
   }
   if (result.goals && result.homeGoals !== undefined && result.awayGoals !== undefined) {
     const acceptedHomeGoals = fixture.has_manual_result ? fixture.home_goals : result.homeGoals;
@@ -708,6 +719,125 @@ export async function runUefaHistoryBackfill(batchSize = 6, analyzeWhenDone = fa
   };
 }
 
+export async function runUefaStatsBackfill(batchSize = 20, analyzeWhenDone = false) {
+  const db = await getDb();
+  await ensureSeedData(db);
+  const limit = Math.max(1, Math.min(25, Math.floor(batchSize)));
+  const fixtures = await db.all(`
+    WITH today_teams AS (
+      SELECT home_team_id AS team_id FROM fixtures
+      WHERE competition_code IN ('CL','EL','ECL')
+        AND date(datetime(kickoff_utc, '+3 hours')) = date(datetime('now', '+3 hours'))
+      UNION
+      SELECT away_team_id AS team_id FROM fixtures
+      WHERE competition_code IN ('CL','EL','ECL')
+        AND date(datetime(kickoff_utc, '+3 hours')) = date(datetime('now', '+3 hours'))
+    )
+    SELECT f.id, f.external_id, f.source_url,
+           hp.external_id AS home_uefa_id, ap.external_id AS away_uefa_id
+    FROM fixtures f
+    JOIN team_provider_ids hp ON hp.team_id=f.home_team_id AND hp.provider='UEFA'
+    JOIN team_provider_ids ap ON ap.team_id=f.away_team_id AND ap.provider='UEFA'
+    LEFT JOIN match_stats ms ON ms.fixture_id=f.id
+    LEFT JOIN fixture_stats_checks fsc ON fsc.fixture_id=f.id AND fsc.provider='UEFA'
+    WHERE f.status='FINISHED' AND ms.fixture_id IS NULL
+      AND (f.home_team_id IN (SELECT team_id FROM today_teams)
+        OR f.away_team_id IN (SELECT team_id FROM today_teams))
+      AND (fsc.fixture_id IS NULL OR (fsc.status='FAILED' AND fsc.attempts < 3))
+    ORDER BY f.kickoff_utc DESC, f.id
+    LIMIT ?
+  `, [limit]) as Array<{
+    id: number;
+    external_id: string;
+    source_url: string;
+    home_uefa_id: string;
+    away_uefa_id: string;
+  }>;
+  const fetched = await Promise.allSettled(fixtures.map(async (fixture) => {
+    const matchId = fixture.source_url.match(/\/match\/(\d+)/)?.[1]
+      || fixture.external_id.match(/uefa-(?:history-)?[A-Z]+-(\d+)/)?.[1];
+    if (!matchId) throw new Error("UEFA maç kimliği bulunamadı.");
+    const sourceUrl = `https://matchstats.uefa.com/v1/team-statistics/${matchId}`;
+    const raw = await fetchJson(sourceUrl);
+    return {
+      fixture,
+      sourceUrl,
+      stats: mapUefaStats(raw, String(fixture.home_uefa_id), String(fixture.away_uefa_id)),
+    };
+  }));
+
+  let updated = 0;
+  let unavailable = 0;
+  const errors: string[] = [];
+  for (let index = 0; index < fetched.length; index += 1) {
+    const item = fetched[index];
+    const fixture = fixtures[index];
+    const checkedAt = new Date().toISOString();
+    if (item.status === "rejected") {
+      const message = item.reason instanceof Error ? item.reason.message : String(item.reason);
+      errors.push(`${fixture.external_id}: ${message}`.slice(0, 220));
+      await db.run(`
+        INSERT INTO fixture_stats_checks(fixture_id, provider, status, attempts, checked_at, notes)
+        VALUES (?, 'UEFA', 'FAILED', 1, ?, ?)
+        ON CONFLICT(fixture_id, provider) DO UPDATE SET status='FAILED',
+          attempts=fixture_stats_checks.attempts + 1, checked_at=excluded.checked_at, notes=excluded.notes
+      `, [fixture.id, checkedAt, message.slice(0, 500)]);
+      continue;
+    }
+    if (item.value.stats && Object.keys(item.value.stats).length) {
+      await upsertMatchStats(db, fixture.id, item.value.stats, item.value.sourceUrl, checkedAt);
+      updated += 1;
+      await db.run(`
+        INSERT INTO fixture_stats_checks(fixture_id, provider, status, attempts, checked_at, notes)
+        VALUES (?, 'UEFA', 'SUCCESS', 1, ?, ?)
+        ON CONFLICT(fixture_id, provider) DO UPDATE SET status='SUCCESS',
+          attempts=fixture_stats_checks.attempts + 1, checked_at=excluded.checked_at, notes=excluded.notes
+      `, [fixture.id, checkedAt, `${Object.keys(item.value.stats).length} alan işlendi`]);
+    } else {
+      unavailable += 1;
+      await db.run(`
+        INSERT INTO fixture_stats_checks(fixture_id, provider, status, attempts, checked_at, notes)
+        VALUES (?, 'UEFA', 'UNAVAILABLE', 1, ?, 'UEFA istatistik yanıtı boş')
+        ON CONFLICT(fixture_id, provider) DO UPDATE SET status='UNAVAILABLE',
+          attempts=fixture_stats_checks.attempts + 1, checked_at=excluded.checked_at,
+          notes=excluded.notes
+      `, [fixture.id, checkedAt]);
+    }
+  }
+  const remainingRow = await db.get(`
+    WITH today_teams AS (
+      SELECT home_team_id AS team_id FROM fixtures
+      WHERE competition_code IN ('CL','EL','ECL')
+        AND date(datetime(kickoff_utc, '+3 hours')) = date(datetime('now', '+3 hours'))
+      UNION
+      SELECT away_team_id AS team_id FROM fixtures
+      WHERE competition_code IN ('CL','EL','ECL')
+        AND date(datetime(kickoff_utc, '+3 hours')) = date(datetime('now', '+3 hours'))
+    )
+    SELECT COUNT(*) AS total
+    FROM fixtures f
+    JOIN team_provider_ids hp ON hp.team_id=f.home_team_id AND hp.provider='UEFA'
+    JOIN team_provider_ids ap ON ap.team_id=f.away_team_id AND ap.provider='UEFA'
+    LEFT JOIN match_stats ms ON ms.fixture_id=f.id
+    LEFT JOIN fixture_stats_checks fsc ON fsc.fixture_id=f.id AND fsc.provider='UEFA'
+    WHERE f.status='FINISHED' AND ms.fixture_id IS NULL
+      AND (f.home_team_id IN (SELECT team_id FROM today_teams)
+        OR f.away_team_id IN (SELECT team_id FROM today_teams))
+      AND (fsc.fixture_id IS NULL OR (fsc.status='FAILED' AND fsc.attempts < 3))
+  `) as { total?: number } | undefined;
+  const remaining = Number(remainingRow?.total || 0);
+  const analysis = analyzeWhenDone ? await runAnalysis(2) : null;
+  return {
+    ok: true,
+    checked: fixtures.length,
+    updated,
+    unavailable,
+    remaining,
+    errors,
+    analysis,
+  };
+}
+
 export async function runDailyCloudSync() {
   const db = await getDb();
   await ensureSeedData(db);
@@ -813,6 +943,10 @@ export async function runDailyCloudSync() {
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     }));
+    const statsBackfill = await runUefaStatsBackfill(8, false).catch((error) => ({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    }));
     // Günlük çalışmada bugünün ve yarının kuponlarını güncelle; 31 günlük
     // kapsamlı yeniden hesaplama periyodik bakımda yapılır.
     const analysis = await runAnalysis(2);
@@ -823,6 +957,7 @@ export async function runDailyCloudSync() {
       completeGoalSets,
       errors: errors.slice(0, 6),
       historyBackfill,
+      statsBackfill,
       analysis,
     });
     await db.run(`
@@ -839,6 +974,7 @@ export async function runDailyCloudSync() {
       updated,
       completeGoalSets,
       historyBackfill,
+      statsBackfill,
       errors: errors.slice(0, 6),
       analysis,
     };

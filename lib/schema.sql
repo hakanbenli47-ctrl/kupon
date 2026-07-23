@@ -239,6 +239,17 @@ CREATE TABLE IF NOT EXISTS fixture_history_backfill (
   CHECK (status IN ('SUCCESS','PARTIAL','FAILED'))
 );
 
+CREATE TABLE IF NOT EXISTS fixture_stats_checks (
+  fixture_id INTEGER NOT NULL REFERENCES fixtures(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 1,
+  checked_at TEXT NOT NULL,
+  notes TEXT,
+  PRIMARY KEY(fixture_id, provider),
+  CHECK (status IN ('SUCCESS','UNAVAILABLE','FAILED'))
+);
+
 INSERT OR IGNORE INTO competitions(code, name, country) VALUES
   ('CL', 'UEFA Şampiyonlar Ligi', 'Avrupa'),
   ('EL', 'UEFA Avrupa Ligi', 'Avrupa'),
