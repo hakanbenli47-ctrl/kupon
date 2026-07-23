@@ -84,6 +84,20 @@ const upsertStats = db.prepare(`
     home_xg=excluded.home_xg, away_xg=excluded.away_xg,
     source_url=excluded.source_url, checked_at=excluded.checked_at
 `);
+const deleteGoalEvents = db.prepare("DELETE FROM goal_events WHERE fixture_id = ?");
+const upsertGoalEventSet = db.prepare(`
+  INSERT INTO goal_event_sets(fixture_id, event_count, is_complete, source_name, source_url, checked_at)
+  VALUES (?, ?, 1, ?, ?, ?)
+  ON CONFLICT(fixture_id) DO UPDATE SET
+    event_count=excluded.event_count, is_complete=1, source_name=excluded.source_name,
+    source_url=excluded.source_url, checked_at=excluded.checked_at
+`);
+const insertGoalEvent = db.prepare(`
+  INSERT INTO goal_events(
+    fixture_id, source_event_id, scoring_team_id, minute, added_time, period,
+    player_name, event_type, is_own_goal, is_penalty, source_url, checked_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, 'GOAL', ?, ?, ?, ?)
+`);
 
 let added = 0;
 let updated = 0;
@@ -150,6 +164,48 @@ try {
         value("home_saves"), value("away_saves"), value("home_big_chances"), value("away_big_chances"),
         value("home_xg"), value("away_xg"), String(item.stats.source_url || sourceUrl),
         new Date(item.stats.checked_at || checkedAt).toISOString(),
+      );
+    }
+
+    if (Array.isArray(item.goal_events) && Number.isInteger(item.home_goals) && Number.isInteger(item.away_goals)) {
+      const goals = item.goal_events.map((event, index) => {
+        const side = String(event.team || "").toLowerCase();
+        const minute = Number(event.minute);
+        const addedTime = Number(event.added_time || 0);
+        if (!["home", "away"].includes(side) || !Number.isInteger(minute) || minute < 1 || minute > 130
+          || !Number.isInteger(addedTime) || addedTime < 0 || addedTime > 30) {
+          throw new Error(`${homeName} - ${awayName} maçında geçersiz gol olayı.`);
+        }
+        return {
+          sourceEventId: String(event.source_event_id || `${side}-${minute}-${addedTime}-${index + 1}`),
+          teamId: side === "home" ? homeId : awayId,
+          side,
+          minute,
+          addedTime,
+          period: event.period ? String(event.period) : null,
+          playerName: event.player_name ? String(event.player_name) : null,
+          ownGoal: event.is_own_goal ? 1 : 0,
+          penalty: event.is_penalty ? 1 : 0,
+          sourceUrl: String(event.source_url || item.goal_events_source_url || sourceUrl),
+          checkedAt: new Date(event.checked_at || item.goal_events_checked_at || checkedAt).toISOString(),
+        };
+      });
+      const homeGoalCount = goals.filter((goal) => goal.side === "home").length;
+      const awayGoalCount = goals.filter((goal) => goal.side === "away").length;
+      if (homeGoalCount !== item.home_goals || awayGoalCount !== item.away_goals) {
+        throw new Error(`${homeName} - ${awayName} gol olayları skorla eşleşmiyor; eksik veri kaydedilmedi.`);
+      }
+      deleteGoalEvents.run(fixtureId);
+      for (const goal of goals) {
+        insertGoalEvent.run(
+          fixtureId, goal.sourceEventId, goal.teamId, goal.minute, goal.addedTime, goal.period,
+          goal.playerName, goal.ownGoal, goal.penalty, goal.sourceUrl, goal.checkedAt,
+        );
+      }
+      upsertGoalEventSet.run(
+        fixtureId, goals.length, String(item.goal_events_source_name || item.source_name || "Resmî kaynak"),
+        String(item.goal_events_source_url || sourceUrl),
+        new Date(item.goal_events_checked_at || checkedAt).toISOString(),
       );
     }
 

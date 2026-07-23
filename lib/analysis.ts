@@ -3,7 +3,7 @@ import "server-only";
 import { getDb, SqliteDb, withTransaction } from "./db";
 import { ensureSeedData } from "./seed";
 
-const MODEL_VERSION = "goal-poisson-2.0";
+const MODEL_VERSION = "goal-poisson-2.1-timing";
 const MARKETS = [1.5, 2.5, 3.5] as const;
 
 type MatchRow = {
@@ -42,6 +42,17 @@ type FixtureRow = {
   away_team_id: number;
   home_team: string;
   away_team: string;
+};
+
+type GoalTimingProfile = {
+  averageScoredMinute: number | null;
+  averageConcededMinute: number | null;
+  firstHalfScoringShare: number | null;
+  lateScoringShare: number | null;
+  lateConcedingShare: number | null;
+  earlyGoalMatchShare: number | null;
+  secondHalfGoalShare: number | null;
+  coverage: number;
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -170,6 +181,48 @@ async function absenceAdjustment(db: SqliteDb, fixtureId: number, teamId: number
   };
 }
 
+async function goalTimingProfile(db: SqliteDb, teamId: number, matches: MatchRow[]): Promise<GoalTimingProfile> {
+  const empty = {
+    averageScoredMinute: null,
+    averageConcededMinute: null,
+    firstHalfScoringShare: null,
+    lateScoringShare: null,
+    lateConcedingShare: null,
+    earlyGoalMatchShare: null,
+    secondHalfGoalShare: null,
+    coverage: 0,
+  };
+  const fixtureIds = matches.map((match) => Number(match.id)).filter(Number.isFinite);
+  if (!fixtureIds.length) return empty;
+  const placeholders = fixtureIds.map(() => "?").join(",");
+  const completeRows = await db.all(`
+    SELECT fixture_id FROM goal_event_sets
+    WHERE is_complete = 1 AND fixture_id IN (${placeholders})
+  `, fixtureIds) as Array<{ fixture_id: number }>;
+  const completeIds = completeRows.map((row) => Number(row.fixture_id));
+  if (!completeIds.length) return empty;
+  const completePlaceholders = completeIds.map(() => "?").join(",");
+  const rows = await db.all(`
+    SELECT ge.fixture_id, ge.scoring_team_id, ge.minute, ge.added_time
+    FROM goal_events ge
+    WHERE ge.fixture_id IN (${completePlaceholders})
+    ORDER BY ge.fixture_id, ge.minute, ge.added_time
+  `, completeIds) as Array<{ fixture_id: number; scoring_team_id: number; minute: number; added_time: number }>;
+  const scored = rows.filter((row) => Number(row.scoring_team_id) === teamId);
+  const conceded = rows.filter((row) => Number(row.scoring_team_id) !== teamId);
+  const matchHasEarlyGoal = new Set(rows.filter((row) => Number(row.minute) <= 30).map((row) => Number(row.fixture_id)));
+  return {
+    averageScoredMinute: scored.length ? mean(scored.map((row) => Number(row.minute)), 0) : null,
+    averageConcededMinute: conceded.length ? mean(conceded.map((row) => Number(row.minute)), 0) : null,
+    firstHalfScoringShare: scored.length ? scored.filter((row) => Number(row.minute) <= 45).length / scored.length : null,
+    lateScoringShare: scored.length ? scored.filter((row) => Number(row.minute) >= 76).length / scored.length : null,
+    lateConcedingShare: conceded.length ? conceded.filter((row) => Number(row.minute) >= 76).length / conceded.length : null,
+    earlyGoalMatchShare: matchHasEarlyGoal.size / completeIds.length,
+    secondHalfGoalShare: rows.length ? rows.filter((row) => Number(row.minute) > 45).length / rows.length : null,
+    coverage: completeIds.length / fixtureIds.length,
+  };
+}
+
 async function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
   const [homeRecent, awayRecent, homeVenue, awayVenue] = await Promise.all([
     recentMatches(db, fixture.home_team_id, fixture.kickoff_utc),
@@ -215,6 +268,11 @@ async function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
 
   let expectedHome = homeAttack * 0.52 + awayDefense * 0.33 + baseline.home * 0.15;
   let expectedAway = awayAttack * 0.52 + homeDefense * 0.33 + baseline.away * 0.15;
+  const [homeTiming, awayTiming] = await Promise.all([
+    goalTimingProfile(db, fixture.home_team_id, homeRecent),
+    goalTimingProfile(db, fixture.away_team_id, awayRecent),
+  ]);
+  const timingCoverage = (homeTiming.coverage + awayTiming.coverage) / 2;
 
   const homeSot = mean(present(hp.map((x) => x.shotsOnTarget)), 4.5);
   const awaySot = mean(present(ap.map((x) => x.shotsOnTarget)), 4.0);
@@ -288,6 +346,24 @@ async function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
   ]);
   expectedHome *= 1 - homeAbsence.attack + awayAbsence.defense;
   expectedAway *= 1 - awayAbsence.attack + homeAbsence.defense;
+  if (timingCoverage >= 0.4) {
+    const earlySignal = mean(
+      present([homeTiming.earlyGoalMatchShare, awayTiming.earlyGoalMatchShare]),
+      0.45,
+    ) - 0.45;
+    const lateSignal = mean(
+      present([
+        homeTiming.lateScoringShare,
+        awayTiming.lateScoringShare,
+        homeTiming.lateConcedingShare,
+        awayTiming.lateConcedingShare,
+      ]),
+      0.22,
+    ) - 0.22;
+    const multiplier = 1 + clamp(earlySignal * 0.08 + lateSignal * 0.06, -0.045, 0.065) * timingCoverage;
+    expectedHome *= multiplier;
+    expectedAway *= multiplier;
+  }
   expectedHome = clamp(expectedHome, 0.25, 3.4);
   expectedAway = clamp(expectedAway, 0.2, 3.1);
 
@@ -298,7 +374,8 @@ async function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
       + Math.min(homeVenue.length, awayVenue.length, 5) * 0.018
       + Math.min(h2h.length, 3) * 0.018
       + Math.min(baseline.total, 100) / 1250
-      + statsCoverage * 0.18,
+      + statsCoverage * 0.15
+      + timingCoverage * 0.06,
     0,
     1,
   );
@@ -348,6 +425,21 @@ async function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
         home_xg: present(hp.map((x) => x.xg)).length ? homeXg : null,
         away_xg: present(ap.map((x) => x.xg)).length ? awayXg : null,
         stats_coverage: statsCoverage,
+        goal_timing_coverage: timingCoverage,
+        home_avg_goal_minute: homeTiming.averageScoredMinute,
+        away_avg_goal_minute: awayTiming.averageScoredMinute,
+        home_avg_conceded_minute: homeTiming.averageConcededMinute,
+        away_avg_conceded_minute: awayTiming.averageConcededMinute,
+        home_first_half_scoring_share: homeTiming.firstHalfScoringShare,
+        away_first_half_scoring_share: awayTiming.firstHalfScoringShare,
+        home_late_scoring_share: homeTiming.lateScoringShare,
+        away_late_scoring_share: awayTiming.lateScoringShare,
+        home_late_conceding_share: homeTiming.lateConcedingShare,
+        away_late_conceding_share: awayTiming.lateConcedingShare,
+        home_early_goal_match_share: homeTiming.earlyGoalMatchShare,
+        away_early_goal_match_share: awayTiming.earlyGoalMatchShare,
+        home_second_half_goal_share: homeTiming.secondHalfGoalShare,
+        away_second_half_goal_share: awayTiming.secondHalfGoalShare,
       },
     };
   }));
@@ -651,6 +743,7 @@ export async function getDashboard(days = 15) {
     SELECT
       (SELECT COUNT(*) FROM fixtures WHERE status = 'FINISHED') AS historical_matches,
       (SELECT COUNT(*) FROM match_stats) AS detailed_stats_matches,
+      (SELECT COUNT(*) FROM goal_event_sets WHERE is_complete = 1) AS goal_timing_matches,
       (SELECT COUNT(*) FROM teams) AS teams,
       (
         SELECT COUNT(*) FROM (
@@ -690,6 +783,7 @@ export async function getDashboard(days = 15) {
       hitRate: Number(metrics.settled || 0) ? Number(metrics.won || 0) / Number(metrics.settled) : null,
       historicalMatches: Number(poolMetrics.historical_matches || 0),
       detailedStatsMatches: Number(poolMetrics.detailed_stats_matches || 0),
+      goalTimingMatches: Number(poolMetrics.goal_timing_matches || 0),
       teams: Number(poolMetrics.teams || 0),
       teamsReady: Number(poolMetrics.teams_ready || 0),
     },

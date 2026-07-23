@@ -16,7 +16,7 @@ Turso üzerinde kalıcı veri havuzu kullanan, 31 günlük fikstürü analiz ede
 
 Her fikstürde HTTPS kaynak bağlantısı ve kontrol zamanı zorunludur. Bulunmayan istatistik uydurulmaz. Tarihi kesinleşmeyen maçlar `TBC`, ertelenenler `POSTPONED` olarak tutulur.
 
-## Model 2.0
+## Model 2.1 — gol zamanlaması
 
 Model yalnızca son beş maçın gol toplamına bakmaz:
 
@@ -27,9 +27,22 @@ Model yalnızca son beş maçın gol toplamına bakmaz:
 - Atak, pas isabeti, tamamlanan/denenen pas, top kazanma ve kurtarış
 - Mevcutsa xG ve büyük şans
 - Yalnızca doğrulanmış sakat ve cezalı oyuncu etkileri
+- Son maçlardaki gol atma/yeme dakikaları, ilk yarı ve 76+ dakika gol oranları
 - Poisson toplam gol olasılığı ve sonuçlardan ampirik kalibrasyon
 
-Her tahminde ayrıntılı istatistik kapsamı ayrıca saklanır. Veri eksikliği kalite puanını düşürür. Kupon Robotu maç başına tek seçim kullanır; en az dört seçim `%72` olasılık ve `%68` veri kalitesi eşiğini geçmezse kupon üretmez. Günlük en fazla iki adet, 4–5 maçlık kupon oluşturur.
+Her tahminde ayrıntılı istatistik ve gol dakikası kapsamı ayrıca saklanır. Gol olaylarının ev/deplasman sayıları resmî skorla tam olarak uyuşmuyorsa dakika verisi eksik kabul edilir ve modele katılmaz. Zamanlama sinyali aşırı uyumu önlemek için beklenen gole sınırlı bir etki yapar. Veri eksikliği kalite puanını düşürür. Kupon Robotu maç başına tek seçim kullanır; en az dört seçim `%72` olasılık ve `%68` veri kalitesi eşiğini geçmezse kupon üretmez. Günlük en fazla iki adet, 4–5 maçlık kupon oluşturur.
+
+## Günlük bulut otomasyonu
+
+Vercel Cron her gün `02:00 UTC` (Türkiye saatiyle yaklaşık `05:00`) `/api/cron/daily` yolunu çağırır. Bilgisayarın açık olması gerekmez. Günlük işlem:
+
+1. Yakın zamanda oynanan maçları UEFA Match Centre ve ücretsiz TheSportsDB verileriyle kontrol eder.
+2. Manuel girilmiş skorları korur.
+3. Doğrulanmış skor, maç istatistiği ve eksiksiz gol olaylarını Turso'ya kaydeder.
+4. Sonuçlanan tahmin ve kuponları kapatır.
+5. 31 günlük analizleri ve günün kuponlarını yeniden üretir.
+
+`CRON_SECRET` tanımlanırsa cron yolu Bearer anahtarıyla korunur. Aynı gün içindeki yinelenen çağrılar `cloud_sync_locks` tablosuyla tekilleştirilir.
 
 ## Manuel veri koruması
 

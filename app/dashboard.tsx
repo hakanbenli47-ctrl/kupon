@@ -66,6 +66,7 @@ type DashboardData = {
     hitRate: number | null;
     historicalMatches: number;
     detailedStatsMatches: number;
+    goalTimingMatches: number;
     teams: number;
     teamsReady: number;
   };
@@ -364,12 +365,12 @@ export default function Dashboard() {
         <div>
           <p className="eyebrow">DÜŞÜK RİSK ODAKLI</p>
           <h1>Golleri veriden oku,<br />kuponu olasılıkla kur.</h1>
-          <p className="hero-copy">Son form, ev/deplasman performansı, H2H ve doğrulanmış oyuncu eksiklerini birlikte değerlendirir.</p>
+          <p className="hero-copy">Son form, ev/deplasman performansı, şut kalitesi, H2H, oyuncu eksikleri ve gol dakikalarını birlikte değerlendirir.</p>
         </div>
         <div className="window-card">
           <span>Analiz penceresi</span>
           <strong>31 gün</strong>
-          <small>Her 15 günde bir 21:14’te yenilenir</small>
+          <small>Veri her gün bulutta yenilenir</small>
         </div>
       </section>
 
@@ -391,7 +392,7 @@ export default function Dashboard() {
         <dl>
           <div><dt>5+ maç verili takım</dt><dd>{data?.metrics.teamsReady ?? "—"} / {data?.metrics.teams ?? "—"}</dd></div>
           <div><dt>Ayrıntılı istatistikli maç</dt><dd>{data?.metrics.detailedStatsMatches ?? "—"}</dd></div>
-          <div><dt>Kaynak</dt><dd>{data?.sources.length ?? "—"}</dd></div>
+          <div><dt>Gol dakikası tam maç</dt><dd>{data?.metrics.goalTimingMatches ?? "—"}</dd></div>
         </dl>
         <div className="source-chips">
           {(data?.sources || []).map((source) => (
@@ -495,6 +496,11 @@ export default function Dashboard() {
                         <span><b>Pas isabeti</b>{detail.home_pass_accuracy?.toFixed(0) ?? "—"}% / {detail.away_pass_accuracy?.toFixed(0) ?? "—"}%</span>
                         <span><b>Top kazanma</b>{detail.home_recoveries?.toFixed(0) ?? "—"} / {detail.away_recoveries?.toFixed(0) ?? "—"}</span>
                         <span><b>Rakibe verilen isabetli şut</b>{detail.home_sot_allowed?.toFixed(1) ?? "—"} / {detail.away_sot_allowed?.toFixed(1) ?? "—"}</span>
+                        <span><b>Gol atma dakikası ort.</b>{detail.home_avg_goal_minute?.toFixed(0) ?? "—"} / {detail.away_avg_goal_minute?.toFixed(0) ?? "—"}</span>
+                        <span><b>Gol yeme dakikası ort.</b>{detail.home_avg_conceded_minute?.toFixed(0) ?? "—"} / {detail.away_avg_conceded_minute?.toFixed(0) ?? "—"}</span>
+                        <span><b>76+ gol atma oranı</b>{detail.home_late_scoring_share == null ? "—" : percentage(detail.home_late_scoring_share)} / {detail.away_late_scoring_share == null ? "—" : percentage(detail.away_late_scoring_share)}</span>
+                        <span><b>76+ gol yeme oranı</b>{detail.home_late_conceding_share == null ? "—" : percentage(detail.home_late_conceding_share)} / {detail.away_late_conceding_share == null ? "—" : percentage(detail.away_late_conceding_share)}</span>
+                        <span><b>Gol dakikası kapsamı</b>{percentage(detail.goal_timing_coverage ?? null)}</span>
                         <span><b>Detay veri kapsamı</b>{percentage(best.stats_coverage)}</span>
                         <span><b>Veri kalitesi</b>{percentage(best.data_quality)}</span>
                         <span><b>Beklenen toplam</b>{best.expected_total.toFixed(2)} gol</span>
@@ -604,7 +610,7 @@ export default function Dashboard() {
         </aside>
       </section>
 
-      <footer><span>Olasılık tahmindir, garanti değildir. Sistem riskli seçimleri zorla kupona eklemez.</span><span>Model: goal-poisson-2.0</span></footer>
+      <footer><span>Olasılık tahmindir, garanti değildir. Sistem riskli seçimleri zorla kupona eklemez.</span><span>Model: goal-poisson-2.1-timing</span></footer>
     </main>
   );
 }

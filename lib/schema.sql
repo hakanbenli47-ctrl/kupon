@@ -76,6 +76,41 @@ CREATE TABLE IF NOT EXISTS match_stats (
   CHECK (away_possession IS NULL OR away_possession BETWEEN 0 AND 100)
 );
 
+CREATE TABLE IF NOT EXISTS goal_event_sets (
+  fixture_id INTEGER PRIMARY KEY REFERENCES fixtures(id) ON DELETE CASCADE,
+  event_count INTEGER NOT NULL,
+  is_complete INTEGER NOT NULL DEFAULT 0,
+  source_name TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  checked_at TEXT NOT NULL,
+  CHECK (event_count >= 0),
+  CHECK (is_complete IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS goal_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fixture_id INTEGER NOT NULL REFERENCES fixtures(id) ON DELETE CASCADE,
+  source_event_id TEXT NOT NULL,
+  scoring_team_id INTEGER NOT NULL REFERENCES teams(id),
+  minute INTEGER NOT NULL,
+  added_time INTEGER NOT NULL DEFAULT 0,
+  period TEXT,
+  player_name TEXT,
+  event_type TEXT NOT NULL DEFAULT 'GOAL',
+  is_own_goal INTEGER NOT NULL DEFAULT 0,
+  is_penalty INTEGER NOT NULL DEFAULT 0,
+  source_url TEXT NOT NULL,
+  checked_at TEXT NOT NULL,
+  UNIQUE(fixture_id, source_event_id),
+  CHECK (minute BETWEEN 1 AND 130),
+  CHECK (added_time BETWEEN 0 AND 30),
+  CHECK (is_own_goal IN (0, 1)),
+  CHECK (is_penalty IN (0, 1))
+);
+
+CREATE INDEX IF NOT EXISTS idx_goal_events_fixture_minute ON goal_events(fixture_id, minute);
+CREATE INDEX IF NOT EXISTS idx_goal_events_team ON goal_events(scoring_team_id, minute);
+
 CREATE TABLE IF NOT EXISTS player_availability (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   fixture_id INTEGER NOT NULL REFERENCES fixtures(id) ON DELETE CASCADE,
@@ -166,6 +201,15 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   fixtures_added INTEGER NOT NULL DEFAULT 0,
   fixtures_updated INTEGER NOT NULL DEFAULT 0,
   sources_checked INTEGER NOT NULL DEFAULT 0,
+  notes TEXT,
+  CHECK (status IN ('RUNNING','SUCCESS','PARTIAL','FAILED'))
+);
+
+CREATE TABLE IF NOT EXISTS cloud_sync_locks (
+  run_key TEXT PRIMARY KEY,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  status TEXT NOT NULL,
   notes TEXT,
   CHECK (status IN ('RUNNING','SUCCESS','PARTIAL','FAILED'))
 );
