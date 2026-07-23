@@ -203,22 +203,32 @@ async function goalTimingProfile(db: SqliteDb, teamId: number, matches: MatchRow
   if (!completeIds.length) return empty;
   const completePlaceholders = completeIds.map(() => "?").join(",");
   const rows = await db.all(`
-    SELECT ge.fixture_id, ge.scoring_team_id, ge.minute, ge.added_time
+    SELECT ge.fixture_id, ge.scoring_team_id, ge.minute, ge.added_time, ge.period
     FROM goal_events ge
     WHERE ge.fixture_id IN (${completePlaceholders})
     ORDER BY ge.fixture_id, ge.minute, ge.added_time
-  `, completeIds) as Array<{ fixture_id: number; scoring_team_id: number; minute: number; added_time: number }>;
+  `, completeIds) as Array<{
+    fixture_id: number;
+    scoring_team_id: number;
+    minute: number;
+    added_time: number;
+    period: string | null;
+  }>;
   const scored = rows.filter((row) => Number(row.scoring_team_id) === teamId);
   const conceded = rows.filter((row) => Number(row.scoring_team_id) !== teamId);
-  const matchHasEarlyGoal = new Set(rows.filter((row) => Number(row.minute) <= 30).map((row) => Number(row.fixture_id)));
+  const elapsedMinute = (row: { minute: number; added_time: number }) =>
+    Number(row.minute) + Number(row.added_time || 0);
+  const isFirstHalf = (row: { minute: number; period: string | null }) =>
+    row.period === "FIRST_HALF" || (!row.period && Number(row.minute) <= 45);
+  const matchHasEarlyGoal = new Set(rows.filter((row) => elapsedMinute(row) <= 30).map((row) => Number(row.fixture_id)));
   return {
-    averageScoredMinute: scored.length ? mean(scored.map((row) => Number(row.minute)), 0) : null,
-    averageConcededMinute: conceded.length ? mean(conceded.map((row) => Number(row.minute)), 0) : null,
-    firstHalfScoringShare: scored.length ? scored.filter((row) => Number(row.minute) <= 45).length / scored.length : null,
-    lateScoringShare: scored.length ? scored.filter((row) => Number(row.minute) >= 76).length / scored.length : null,
-    lateConcedingShare: conceded.length ? conceded.filter((row) => Number(row.minute) >= 76).length / conceded.length : null,
+    averageScoredMinute: scored.length ? mean(scored.map(elapsedMinute), 0) : null,
+    averageConcededMinute: conceded.length ? mean(conceded.map(elapsedMinute), 0) : null,
+    firstHalfScoringShare: scored.length ? scored.filter(isFirstHalf).length / scored.length : null,
+    lateScoringShare: scored.length ? scored.filter((row) => elapsedMinute(row) >= 76).length / scored.length : null,
+    lateConcedingShare: conceded.length ? conceded.filter((row) => elapsedMinute(row) >= 76).length / conceded.length : null,
     earlyGoalMatchShare: matchHasEarlyGoal.size / completeIds.length,
-    secondHalfGoalShare: rows.length ? rows.filter((row) => Number(row.minute) > 45).length / rows.length : null,
+    secondHalfGoalShare: rows.length ? rows.filter((row) => !isFirstHalf(row)).length / rows.length : null,
     coverage: completeIds.length / fixtureIds.length,
   };
 }
