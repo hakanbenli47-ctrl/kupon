@@ -99,7 +99,19 @@ function normalizeName(value: unknown) {
 function teamsMatch(expected: string, actual: unknown) {
   const left = normalizeName(expected);
   const right = normalizeName(actual);
-  return Boolean(left && right && (left === right || left.includes(right) || right.includes(left)));
+  const aliases: Record<string, string> = {
+    maccabitelaviv: "mtelaviv",
+    universitateacluj: "ucluj",
+    atleticdescaldes: "atescaldes",
+    hapoeltelaviv: "htelaviv",
+    havnarboltfelag: "hboltfelag",
+  };
+  const canonicalLeft = aliases[left] || left;
+  const canonicalRight = aliases[right] || right;
+  return Boolean(canonicalLeft && canonicalRight
+    && (canonicalLeft === canonicalRight
+      || canonicalLeft.includes(canonicalRight)
+      || canonicalRight.includes(canonicalLeft)));
 }
 
 async function fetchJson(url: string, timeoutMs = 8_000) {
@@ -627,7 +639,7 @@ export async function runUefaHistoryBackfill(batchSize = 6, analyzeWhenDone = fa
     LEFT JOIN fixture_history_backfill fhb ON fhb.fixture_id = f.id AND fhb.provider = 'UEFA'
     WHERE f.competition_code IN ('CL','EL','ECL')
       AND date(datetime(f.kickoff_utc, '+3 hours')) = date(datetime('now', '+3 hours'))
-      AND (fhb.fixture_id IS NULL OR (fhb.status <> 'SUCCESS' AND fhb.attempts < 3))
+      AND (fhb.fixture_id IS NULL OR (fhb.status <> 'SUCCESS' AND fhb.attempts < 5))
     ORDER BY f.kickoff_utc, f.id
     LIMIT ?
   `, [limit]) as unknown as SyncFixture[];
@@ -679,7 +691,7 @@ export async function runUefaHistoryBackfill(batchSize = 6, analyzeWhenDone = fa
     LEFT JOIN fixture_history_backfill fhb ON fhb.fixture_id=f.id AND fhb.provider='UEFA'
     WHERE f.competition_code IN ('CL','EL','ECL')
       AND date(datetime(f.kickoff_utc, '+3 hours')) = date(datetime('now', '+3 hours'))
-      AND (fhb.fixture_id IS NULL OR (fhb.status <> 'SUCCESS' AND fhb.attempts < 3))
+      AND (fhb.fixture_id IS NULL OR (fhb.status <> 'SUCCESS' AND fhb.attempts < 5))
   `) as { total?: number } | undefined;
   const remaining = Number(remainingRow?.total || 0);
   const analysis = analyzeWhenDone ? await runAnalysis(2) : null;
