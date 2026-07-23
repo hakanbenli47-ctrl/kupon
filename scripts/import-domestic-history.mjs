@@ -13,7 +13,12 @@ const checkedAt = new Date().toISOString();
 const allFixtures = [];
 const competitions = [];
 const currentSeed = JSON.parse(fs.readFileSync(path.join(process.cwd(), "data", "imports", "uefa-2026-07-22.generated.json"), "utf8"));
-const targetNames = [...new Set(currentSeed.fixtures.flatMap((fixture) => [fixture.home_team, fixture.away_team]))];
+const schedulePath = path.join(process.cwd(), "data", "imports", "official-domestic-2026-27.generated.json");
+const scheduleSeed = fs.existsSync(schedulePath) ? JSON.parse(fs.readFileSync(schedulePath, "utf8")) : { fixtures: [] };
+const targetNames = [...new Set(
+  [...currentSeed.fixtures, ...scheduleSeed.fixtures].flatMap((fixture) => [fixture.home_team, fixture.away_team]),
+)];
+const fullHistoryFiles = new Set(["en.1.json", "es.1.json", "tr.1.json"]);
 const aliases = new Map([
   ["RSC Anderlecht", "Anderlecht"],
   ["PAOK Saloniki", "PAOK"],
@@ -30,7 +35,7 @@ const aliases = new Map([
 
 function normalized(value) {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("en")
-    .replace(/\b(fc|cf|fk|sk|ac|afc|sc|club)\b/g, "").replace(/[^a-z0-9]/g, "");
+    .replace(/\b(fc|cf|fk|sk|ac|afc|sc|club|rc|rcd|ud)\b/g, "").replace(/[^a-z0-9]/g, "");
 }
 
 const targetsByNormalized = new Map(targetNames.map((name) => [normalized(name), name]));
@@ -68,11 +73,14 @@ for (const file of files) {
       source_name: "OpenFootball CC0",
       source_url: pageUrl,
       source_checked_at: checkedAt,
+      _source_file: file,
     });
   }
 }
 
-const selectedIds = new Set();
+const selectedIds = new Set(
+  allFixtures.filter((fixture) => fullHistoryFiles.has(fixture._source_file)).map((fixture) => fixture.external_id),
+);
 for (const team of targetNames) {
   allFixtures
     .filter((fixture) => fixture.home_team === team || fixture.away_team === team)
@@ -81,6 +89,11 @@ for (const team of targetNames) {
     .forEach((fixture) => selectedIds.add(fixture.external_id));
 }
 const fixtures = allFixtures.filter((fixture) => selectedIds.has(fixture.external_id))
+  .map((fixture) => {
+    const cleaned = { ...fixture };
+    delete cleaned._source_file;
+    return cleaned;
+  })
   .sort((a, b) => a.kickoff_utc.localeCompare(b.kickoff_utc));
 const output = path.join(process.cwd(), "data", "imports", "domestic-2025-26-history.generated.json");
 fs.writeFileSync(output, JSON.stringify({ competitions, fixtures }, null, 2), "utf8");

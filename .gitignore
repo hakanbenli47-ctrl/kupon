@@ -31,12 +31,15 @@
 !/data/imports/uefa-2026-07-22.generated.json
 !/data/imports/uefa-2025-26-history.generated.json
 !/data/imports/domestic-2025-26-history.generated.json
+!/data/imports/official-domestic-2026-27.generated.json
 
 # debug
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+.codex-test-server.log
+/tmp/
 
 # env files (can opt-in for committing if needed)
 .env*

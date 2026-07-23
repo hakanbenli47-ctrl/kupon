@@ -1,6 +1,7 @@
 import currentSeed from "@/data/imports/uefa-2026-07-22.generated.json";
 import historySeed from "@/data/imports/uefa-2025-26-history.generated.json";
 import domesticSeed from "@/data/imports/domestic-2025-26-history.generated.json";
+import scheduleSeed from "@/data/imports/official-domestic-2026-27.generated.json";
 import type { SqliteDb } from "./db";
 
 let seeding: Promise<void> | null = null;
@@ -17,10 +18,12 @@ export async function ensureSeedData(db: SqliteDb) {
       const count = await db.get("SELECT COUNT(*) AS total FROM fixtures") as { total?: number } | undefined;
       const historyCount = await db.get("SELECT COUNT(*) AS total FROM fixtures WHERE external_id LIKE 'uefa-history-%'") as { total?: number } | undefined;
       const domesticCount = await db.get("SELECT COUNT(*) AS total FROM fixtures WHERE external_id LIKE 'openfootball-%'") as { total?: number } | undefined;
+      const scheduleCount = await db.get("SELECT COUNT(*) AS total FROM fixtures WHERE external_id LIKE 'official-%'") as { total?: number } | undefined;
       const fixtures = [
         ...(Number(count?.total || 0) === 0 ? currentSeed.fixtures : []),
         ...(Number(historyCount?.total || 0) < historySeed.fixtures.length ? historySeed.fixtures : []),
         ...(Number(domesticCount?.total || 0) < domesticSeed.fixtures.length ? domesticSeed.fixtures : []),
+        ...(Number(scheduleCount?.total || 0) < scheduleSeed.fixtures.length ? scheduleSeed.fixtures : []),
       ];
       if (!fixtures.length) return;
 
@@ -76,7 +79,7 @@ export async function ensureSeedData(db: SqliteDb) {
       await db.run(`
         INSERT INTO sync_runs(started_at, finished_at, status, fixtures_added, fixtures_updated, sources_checked, notes)
         VALUES (?, ?, 'SUCCESS', ?, 0, ?, ?)
-      `, [now, now, fixtures.length, fixtures.length, "UEFA ve ulusal lig 2025/26 geçmiş veri yüklemesi"]);
+      `, [now, now, fixtures.length, fixtures.length, "UEFA, ulusal lig geçmişi ve 2026/27 resmi lig fikstürleri"]);
     })().catch((error) => {
       seeding = null;
       throw error;

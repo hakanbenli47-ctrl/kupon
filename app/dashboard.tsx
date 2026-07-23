@@ -34,6 +34,7 @@ type Coupon = {
   label: string;
   combined_probability: number;
   risk: string;
+  status: "ACTIVE" | "PENDING" | "WON" | "LOST";
   selections: Array<{
     position: number;
     market: number;
@@ -44,6 +45,10 @@ type Coupon = {
     away_team: string;
     competition_code: string;
     competition: string;
+    outcome: "WON" | "LOST" | "VOID" | null;
+    fixture_status: string;
+    home_goals: number | null;
+    away_goals: number | null;
   }>;
 };
 
@@ -51,7 +56,17 @@ type DashboardData = {
   generatedAt: string;
   fixtures: Fixture[];
   coupons: Coupon[];
-  metrics: { upcoming: number; analyzed: number; settled: number; hitRate: number | null };
+  metrics: {
+    upcoming: number;
+    analyzed: number;
+    settled: number;
+    hitRate: number | null;
+    historicalMatches: number;
+    detailedStatsMatches: number;
+    teams: number;
+    teamsReady: number;
+  };
+  sources: Array<{ name: string; matches: number; results: number; lastCheckedAt: string | null }>;
   lastSync: null | { finished_at?: string; status?: string; notes?: string };
 };
 
@@ -67,13 +82,14 @@ const leagues = [
 
 type DateRange = "TODAY" | "TOMORROW" | "NEXT3" | "NEXT7" | "ALL" | "CUSTOM";
 type AnalysisFilter = "ALL" | "READY" | "WAITING";
+type CouponTab = "READY" | "SELECTED" | "HISTORY";
 
 const dateRanges: Array<[DateRange, string]> = [
   ["TODAY", "Bugün"],
   ["TOMORROW", "Yarın"],
   ["NEXT3", "3 gün"],
   ["NEXT7", "7 gün"],
-  ["ALL", "Tüm 15 gün"],
+  ["ALL", "Tüm 31 gün"],
 ];
 
 function dateKey(value: string | Date) {
@@ -119,6 +135,16 @@ function formatDate(value: string) {
   }).format(new Date(value));
 }
 
+function formatFixtureDate(value: string, status: string) {
+  if (status !== "TBC") return formatDate(value);
+  const date = new Intl.DateTimeFormat("tr-TR", {
+    timeZone: "Europe/Istanbul",
+    day: "2-digit",
+    month: "short",
+  }).format(new Date(value));
+  return `${date} · Saat bekleniyor`;
+}
+
 function marketLabel(prediction: Prediction) {
   return `${prediction.market.toFixed(1)} ${prediction.selection === "UST" ? "Üst" : "Alt"}`;
 }
@@ -136,6 +162,13 @@ function details(prediction?: Prediction) {
   }
 }
 
+function couponStatusLabel(status: Coupon["status"]) {
+  if (status === "WON") return "Tuttu";
+  if (status === "LOST") return "Tutmadı";
+  if (status === "PENDING") return "Sonuç bekliyor";
+  return "Hazır";
+}
+
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [league, setLeague] = useState("ALL");
@@ -145,10 +178,24 @@ export default function Dashboard() {
   const [teamQuery, setTeamQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [couponTab, setCouponTab] = useState<CouponTab>("READY");
+  const [selectedCouponIds, setSelectedCouponIds] = useState<number[]>([]);
+
+  useEffect(() => {
+    let storedIds: number[] = [];
+    try {
+      const stored = JSON.parse(localStorage.getItem("selectedCouponIds") || "[]");
+      if (Array.isArray(stored)) storedIds = stored.filter((id) => Number.isInteger(id));
+    } catch {
+      localStorage.removeItem("selectedCouponIds");
+    }
+    const timer = window.setTimeout(() => setSelectedCouponIds(storedIds), 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch("/api/dashboard?days=15", { cache: "no-store" });
+      const response = await fetch("/api/dashboard?days=31", { cache: "no-store" });
       if (!response.ok) throw new Error("Panel verisi alınamadı.");
       setData(await response.json());
       setError("");
@@ -159,7 +206,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     let active = true;
-    fetch("/api/dashboard?days=15", { cache: "no-store" })
+    fetch("/api/dashboard?days=31", { cache: "no-store" })
       .then((response) => {
         if (!response.ok) throw new Error("Panel verisi alınamadı.");
         return response.json() as Promise<DashboardData>;
@@ -184,7 +231,7 @@ export default function Dashboard() {
       const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ days: 15 }),
+        body: JSON.stringify({ days: 31 }),
       });
       if (!response.ok) throw new Error("Analiz tamamlanamadı.");
       await load();
@@ -216,10 +263,23 @@ export default function Dashboard() {
   }, [analysisFilter, customDate, data, dateRange, league, teamQuery, today]);
 
   const coupons = useMemo(() => (data?.coupons || []).filter((coupon) => {
+    const selected = selectedCouponIds.includes(coupon.id);
+    if (couponTab === "SELECTED") return selected;
+    if (couponTab === "HISTORY") return coupon.status !== "ACTIVE";
     const dateMatches = matchesDateRange(`${coupon.generated_for}T12:00:00+03:00`, dateRange, customDate, today);
     const leagueMatches = league === "ALL" || coupon.selections.some((pick) => pick.competition_code === league);
-    return dateMatches && leagueMatches;
-  }), [customDate, data, dateRange, league, today]);
+    return coupon.status === "ACTIVE" && dateMatches && leagueMatches;
+  }), [couponTab, customDate, data, dateRange, league, selectedCouponIds, today]);
+
+  const toggleCoupon = (couponId: number) => {
+    setSelectedCouponIds((current) => {
+      const next = current.includes(couponId)
+        ? current.filter((id) => id !== couponId)
+        : [...current, couponId];
+      localStorage.setItem("selectedCouponIds", JSON.stringify(next));
+      return next;
+    });
+  };
 
   const resetFilters = () => {
     setLeague("ALL");
@@ -236,7 +296,7 @@ export default function Dashboard() {
           <span className="brand-mark">K</span>
           <div>
             <strong>Kupon Analiz</strong>
-            <span>15 günlük gol tahmin paneli</span>
+            <span>31 günlük gol tahmin paneli</span>
           </div>
         </div>
         <div className="top-actions">
@@ -258,7 +318,7 @@ export default function Dashboard() {
         </div>
         <div className="window-card">
           <span>Analiz penceresi</span>
-          <strong>15 gün</strong>
+          <strong>31 gün</strong>
           <small>Her 15 günde bir 21:14’te yenilenir</small>
         </div>
       </section>
@@ -266,10 +326,28 @@ export default function Dashboard() {
       {error && <div className="error-banner" role="alert">{error}</div>}
 
       <section className="metrics" aria-label="Özet">
-        <article><span>Yaklaşan maç</span><strong>{data?.metrics.upcoming ?? "—"}</strong><small>15 günlük fikstür</small></article>
+        <article><span>Yaklaşan maç</span><strong>{data?.metrics.upcoming ?? "—"}</strong><small>31 günlük fikstür</small></article>
         <article><span>Analizi hazır</span><strong>{data?.metrics.analyzed ?? "—"}</strong><small>Yeterli geçmiş verili</small></article>
         <article><span>Sonuçlanan tahmin</span><strong>{data?.metrics.settled ?? "—"}</strong><small>Model geri bildirimi</small></article>
         <article><span>İsabet oranı</span><strong>{percentage(data?.metrics.hitRate ?? null)}</strong><small>Tekil seçim başarısı</small></article>
+      </section>
+
+      <section className="pool-panel" aria-label="Veri havuzu">
+        <div>
+          <p className="eyebrow">KENDİ VERİ HAVUZUMUZ</p>
+          <h2>{data?.metrics.historicalMatches ?? "—"} doğrulanmış maç sonucu</h2>
+          <p>Lig, kupa ve UEFA maçları aynı takım geçmişinde birleşir. Model her takımın son 5 maçını sezon ayrımı yapmadan kullanır.</p>
+        </div>
+        <dl>
+          <div><dt>5+ maç verili takım</dt><dd>{data?.metrics.teamsReady ?? "—"} / {data?.metrics.teams ?? "—"}</dd></div>
+          <div><dt>Ayrıntılı istatistikli maç</dt><dd>{data?.metrics.detailedStatsMatches ?? "—"}</dd></div>
+          <div><dt>Kaynak</dt><dd>{data?.sources.length ?? "—"}</dd></div>
+        </dl>
+        <div className="source-chips">
+          {(data?.sources || []).map((source) => (
+            <span key={source.name}><b>{source.name}</b>{source.results} sonuç / {source.matches} maç</span>
+          ))}
+        </div>
       </section>
 
       <section className="filter-panel" aria-label="Maç filtreleri">
@@ -343,7 +421,7 @@ export default function Dashboard() {
                 <article className="fixture-row" key={fixture.id}>
                   <div className="fixture-meta">
                     <span className="league-code">{fixture.competition_code}</span>
-                    <time>{formatDate(fixture.kickoff_utc)}</time>
+                    <time>{formatFixtureDate(fixture.kickoff_utc, fixture.status)}</time>
                   </div>
                   <div className="teams"><strong>{fixture.home_team}</strong><span>—</span><strong>{fixture.away_team}</strong></div>
                   <div className="markets">
@@ -374,19 +452,43 @@ export default function Dashboard() {
         </div>
 
         <aside className="coupon-section">
-          <div className="section-heading"><div><p className="eyebrow">OTOMATİK SEÇİM</p><h2>Günün kuponları</h2></div></div>
+          <div className="section-heading"><div><p className="eyebrow">OTOMATİK SEÇİM</p><h2>Kupon Robotu</h2></div></div>
+          <div className="coupon-tabs" role="tablist" aria-label="Kupon görünümü">
+            <button type="button" className={couponTab === "READY" ? "active" : ""} onClick={() => setCouponTab("READY")}>Hazır</button>
+            <button type="button" className={couponTab === "SELECTED" ? "active" : ""} onClick={() => setCouponTab("SELECTED")}>Seçtiklerim ({selectedCouponIds.length})</button>
+            <button type="button" className={couponTab === "HISTORY" ? "active" : ""} onClick={() => setCouponTab("HISTORY")}>Geçmiş</button>
+          </div>
           {!coupons.length && (
-            <div className="coupon-empty"><span className="coupon-number">0</span><strong>Kupon oluşmadı</strong><p>En az dört maç %72 güven ve veri kalitesi eşiğini geçmelidir.</p></div>
+            <div className="coupon-empty"><span className="coupon-number">0</span><strong>Bu bölümde kupon yok</strong><p>Hazır kupon için en az dört maç %72 güven ve veri kalitesi eşiğini geçmelidir.</p></div>
           )}
           {coupons.map((coupon) => (
-            <article className="coupon-card" key={coupon.id}>
-              <div className="coupon-head"><div><span>{coupon.generated_for}</span><strong>{coupon.label}</strong></div><b>{percentage(coupon.combined_probability)}</b></div>
+            <article className={`coupon-card status-${coupon.status.toLowerCase()}`} key={coupon.id}>
+              <div className="coupon-head">
+                <div><span>{coupon.generated_for} · {couponStatusLabel(coupon.status)}</span><strong>{coupon.label}</strong></div>
+                <b>{coupon.status === "WON" ? "✓" : coupon.status === "LOST" ? "×" : percentage(coupon.combined_probability)}</b>
+              </div>
               <ol>
                 {coupon.selections.map((pick) => (
-                  <li key={`${coupon.id}-${pick.position}`}><div><strong>{pick.home_team} – {pick.away_team}</strong><span>{pick.market.toFixed(1)} {pick.selection === "UST" ? "Üst" : "Alt"}</span></div><b>{percentage(pick.probability)}</b></li>
+                  <li key={`${coupon.id}-${pick.position}`}>
+                    <div>
+                      <strong>{pick.home_team} – {pick.away_team}</strong>
+                      <span>
+                        {pick.market.toFixed(1)} {pick.selection === "UST" ? "Üst" : "Alt"}
+                        {pick.home_goals !== null && pick.away_goals !== null ? ` · ${pick.home_goals}-${pick.away_goals}` : ""}
+                      </span>
+                    </div>
+                    <b className={pick.outcome ? `pick-${pick.outcome.toLowerCase()}` : ""}>
+                      {pick.outcome === "WON" ? "✓" : pick.outcome === "LOST" ? "×" : percentage(pick.probability)}
+                    </b>
+                  </li>
                 ))}
               </ol>
-              <div className="coupon-foot"><span>Birleşik olasılık</span><strong>{percentage(coupon.combined_probability)}</strong></div>
+              <div className="coupon-foot">
+                <span>Birleşik olasılık <strong>{percentage(coupon.combined_probability)}</strong></span>
+                <button type="button" onClick={() => toggleCoupon(coupon.id)}>
+                  {selectedCouponIds.includes(coupon.id) ? "Seçimi kaldır" : "Kuponu seç"}
+                </button>
+              </div>
             </article>
           ))}
         </aside>
