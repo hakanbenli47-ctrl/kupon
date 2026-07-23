@@ -31,7 +31,7 @@ Model yalnızca son beş maçın gol toplamına bakmaz:
 - Son maçlardaki gol atma/yeme dakikaları, ilk yarı ve 76+ dakika gol oranları
 - Poisson toplam gol olasılığı ve sonuçlardan ampirik kalibrasyon
 
-Her tahminde ayrıntılı istatistik ve gol dakikası kapsamı ayrıca saklanır. Gol olaylarının ev/deplasman sayıları resmî skorla tam olarak uyuşmuyorsa dakika verisi eksik kabul edilir ve modele katılmaz. Zamanlama sinyali aşırı uyumu önlemek için beklenen gole sınırlı bir etki yapar. Veri eksikliği kalite puanını düşürür. Kupon Robotu maç başına tek seçim kullanır; en az dört seçim `%72` olasılık ve `%68` veri kalitesi eşiğini geçmezse kupon üretmez. Günlük en fazla iki adet, 4–5 maçlık kupon oluşturur.
+Her tahminde ayrıntılı istatistik ve gol dakikası kapsamı ayrıca saklanır. Gol olaylarının ev/deplasman sayıları resmî skorla tam olarak uyuşmuyorsa dakika verisi eksik kabul edilir ve modele katılmaz. Zamanlama sinyali aşırı uyumu önlemek için beklenen gole sınırlı bir etki yapar. Veri eksikliği kalite puanını düşürür. Kupon Robotu maç başına tek seçim kullanır ve analizi hazır olan günün bütün maçlarını 4–5 maçlık gruplara dağıtır. Her seçimi en fazla bir kez kullanır; yalnızca 4–7 analiz bulunduğunda son grubun dört maça tamamlanması için en güçlü seçimlerden sınırlı tekrar yapar. Gruptaki bütün seçimler `%72` olasılık ve `%68` veri kalitesi eşiğini geçiyorsa kupon `Banko`, aksi durumda `Alternatif` olarak etiketlenir.
 
 ## Günlük bulut otomasyonu
 

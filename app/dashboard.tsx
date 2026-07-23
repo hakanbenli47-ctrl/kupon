@@ -87,6 +87,7 @@ const leagues = [
 type DateRange = "TODAY" | "TOMORROW" | "NEXT3" | "NEXT7" | "ALL" | "CUSTOM";
 type AnalysisFilter = "ALL" | "READY" | "WAITING";
 type CouponTab = "READY" | "SELECTED" | "HISTORY";
+type MainView = "ANALYSIS" | "COUPONS";
 
 const dateRanges: Array<[DateRange, string]> = [
   ["TODAY", "Bugün"],
@@ -182,9 +183,9 @@ export default function Dashboard() {
   const [teamQuery, setTeamQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [mainView, setMainView] = useState<MainView>("ANALYSIS");
   const [couponTab, setCouponTab] = useState<CouponTab>("READY");
   const [selectedCouponIds, setSelectedCouponIds] = useState<number[]>([]);
-  const [couponRobotOpen, setCouponRobotOpen] = useState(false);
   const [manualToken, setManualToken] = useState("");
   const [scoreDrafts, setScoreDrafts] = useState<Record<number, { home: string; away: string }>>({});
   const [savingCouponId, setSavingCouponId] = useState<number | null>(null);
@@ -237,7 +238,7 @@ export default function Dashboard() {
     return () => { active = false; };
   }, []);
 
-  const analyze = async () => {
+  const analyze = async (openCoupons = false) => {
     setBusy(true);
     setError("");
     try {
@@ -248,6 +249,10 @@ export default function Dashboard() {
       });
       if (!response.ok) throw new Error("Analiz tamamlanamadı.");
       await load();
+      if (openCoupons) {
+        setCouponTab("READY");
+        setMainView("COUPONS");
+      }
     } catch (analysisError) {
       setError(analysisError instanceof Error ? analysisError.message : "Analiz tamamlanamadı.");
     } finally {
@@ -281,6 +286,26 @@ export default function Dashboard() {
     if (couponTab === "HISTORY") return coupon.status !== "ACTIVE";
     return coupon.status === "ACTIVE" && coupon.generated_for === today;
   }), [couponTab, data, selectedCouponIds, today]);
+  const fixtureById = useMemo(
+    () => new Map((data?.fixtures || []).map((fixture) => [fixture.id, fixture])),
+    [data],
+  );
+  const todayReadyFixtures = useMemo(
+    () => (data?.fixtures || []).filter(
+      (fixture) => dateKey(fixture.kickoff_utc) === today && fixture.predictions.length > 0,
+    ),
+    [data, today],
+  );
+  const todayActiveCoupons = useMemo(
+    () => (data?.coupons || []).filter(
+      (coupon) => coupon.generated_for === today && coupon.status === "ACTIVE",
+    ),
+    [data, today],
+  );
+  const todayCouponMatches = useMemo(
+    () => new Set(todayActiveCoupons.flatMap((coupon) => coupon.selections.map((pick) => pick.fixture_id))).size,
+    [todayActiveCoupons],
+  );
 
   const updateScore = (fixtureId: number, side: "home" | "away", value: string) => {
     if (value !== "" && !/^\d{1,2}$/.test(value)) return;
@@ -350,18 +375,30 @@ export default function Dashboard() {
             <span>31 günlük gol tahmin paneli</span>
           </div>
         </div>
+        <nav className="main-tabs" aria-label="Ana bölümler">
+          <button type="button" className={mainView === "ANALYSIS" ? "active" : ""} onClick={() => setMainView("ANALYSIS")}>
+            Maç Analizleri
+          </button>
+          <button
+            type="button"
+            className={mainView === "COUPONS" ? "active" : ""}
+            onClick={() => setMainView("COUPONS")}
+          >
+            Kupon Robotu
+          </button>
+        </nav>
         <div className="top-actions">
           <span className="sync-dot" aria-hidden="true" />
           <span className="sync-text">
             {data?.lastSync?.finished_at ? `Son veri: ${formatDate(data.lastSync.finished_at)}` : "İlk veri güncellemesi bekleniyor"}
           </span>
-          <button className="primary-button" onClick={analyze} disabled={busy}>
-            {busy ? "Hesaplanıyor…" : "Analizi çalıştır"}
+          <button className="primary-button" onClick={() => analyze(true)} disabled={busy}>
+            {busy ? "Kupon hazırlanıyor…" : "Otomatik Kupon Hazırla"}
           </button>
         </div>
       </header>
 
-      <section className="hero">
+      <section className="hero" hidden={mainView !== "ANALYSIS"}>
         <div>
           <p className="eyebrow">DÜŞÜK RİSK ODAKLI</p>
           <h1>Golleri veriden oku,<br />kuponu olasılıkla kur.</h1>
@@ -376,14 +413,14 @@ export default function Dashboard() {
 
       {error && <div className="error-banner" role="alert">{error}</div>}
 
-      <section className="metrics" aria-label="Özet">
+      <section className="metrics" aria-label="Özet" hidden={mainView !== "ANALYSIS"}>
         <article><span>Yaklaşan maç</span><strong>{data?.metrics.upcoming ?? "—"}</strong><small>31 günlük fikstür</small></article>
         <article><span>Analizi hazır</span><strong>{data?.metrics.analyzed ?? "—"}</strong><small>Yeterli geçmiş verili</small></article>
         <article><span>Sonuçlanan tahmin</span><strong>{data?.metrics.settled ?? "—"}</strong><small>Model geri bildirimi</small></article>
         <article><span>İsabet oranı</span><strong>{percentage(data?.metrics.hitRate ?? null)}</strong><small>Tekil seçim başarısı</small></article>
       </section>
 
-      <section className="pool-panel" aria-label="Veri havuzu">
+      <section className="pool-panel" aria-label="Veri havuzu" hidden={mainView !== "ANALYSIS"}>
         <div>
           <p className="eyebrow">KENDİ VERİ HAVUZUMUZ</p>
           <h2>{data?.metrics.historicalMatches ?? "—"} doğrulanmış maç sonucu</h2>
@@ -401,7 +438,7 @@ export default function Dashboard() {
         </div>
       </section>
 
-      <section className="filter-panel" aria-label="Maç filtreleri">
+      <section className="filter-panel" aria-label="Maç filtreleri" hidden={mainView !== "ANALYSIS"}>
         <div className="filter-topline">
           <div><p className="eyebrow">FİLTRELE</p><h2>Günün maçlarını seç</h2></div>
           <button className="reset-button" type="button" onClick={resetFilters}>Filtreleri sıfırla</button>
@@ -453,8 +490,8 @@ export default function Dashboard() {
         </div>
       </section>
 
-      <section className="content-grid">
-        <div className="fixture-section">
+      <section className={mainView === "COUPONS" ? "content-grid coupon-view" : "content-grid analysis-view"}>
+        <div className="fixture-section" hidden={mainView !== "ANALYSIS"}>
           <div className="section-heading">
             <div><p className="eyebrow">FİKSTÜR & OLASILIK</p><h2>Önümüzdeki maçlar</h2></div>
             <span>{fixtures.length} karşılaşma</span>
@@ -513,47 +550,66 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <aside className="coupon-section">
+        <aside className="coupon-section" hidden={mainView !== "COUPONS"}>
+          <div className="coupon-workspace-head">
+            <div>
+              <p className="eyebrow">BUGÜNÜN SEÇİM MERKEZİ</p>
+              <h1>Kupon Robotu</h1>
+              <p>Analizi hazır bütün maçlar 4–5 maçlık Banko ve Alternatif kuponlara dağıtılır. Maç sonuçları otomatik kontrol edilir; istersen skorları elle de girebilirsin.</p>
+            </div>
+            <dl>
+              <div><dt>Analizi hazır</dt><dd>{todayReadyFixtures.length}</dd></div>
+              <div><dt>Kupona alınan</dt><dd>{todayCouponMatches}</dd></div>
+              <div><dt>Hazır kupon</dt><dd>{todayActiveCoupons.length}</dd></div>
+            </dl>
+          </div>
           <div className="section-heading"><div><p className="eyebrow">OTOMATİK SEÇİM</p><h2>Kupon Robotu</h2></div></div>
           <button
             type="button"
             className="robot-button"
-            onClick={() => { setCouponRobotOpen(true); setCouponTab("READY"); }}
+            onClick={() => analyze(true)}
+            disabled={busy}
           >
-            Bugünün Kuponunu Getir
+            {busy ? "Kuponlar yeniden hesaplanıyor…" : "Bugünün Kuponlarını Yenile"}
           </button>
           <div className="coupon-tabs" role="tablist" aria-label="Kupon görünümü">
             <button type="button" className={couponTab === "READY" ? "active" : ""} onClick={() => setCouponTab("READY")}>Bugün</button>
             <button type="button" className={couponTab === "SELECTED" ? "active" : ""} onClick={() => setCouponTab("SELECTED")}>Seçtiklerim ({selectedCouponIds.length})</button>
             <button type="button" className={couponTab === "HISTORY" ? "active" : ""} onClick={() => setCouponTab("HISTORY")}>Geçmiş</button>
           </div>
-          {couponTab === "READY" && !couponRobotOpen && (
-            <div className="coupon-empty"><span className="coupon-number">K</span><strong>Robot hazır</strong><p>Yalnızca bugünün düşük risk eşiğini geçen 4–5 maçlık kuponlarını görmek için düğmeye bas.</p></div>
+          <div className="coupon-card-grid">
+          {!coupons.length && (
+            <div className="coupon-empty"><span className="coupon-number">0</span><strong>Bu bölümde kupon yok</strong><p>Bugün en az dört analiz hazır olduğunda robot 4–5 maçlık grupları oluşturur.</p></div>
           )}
-          {(couponTab !== "READY" || couponRobotOpen) && !coupons.length && (
-            <div className="coupon-empty"><span className="coupon-number">0</span><strong>Bu bölümde kupon yok</strong><p>Robot zorla seçim üretmez. En az dört maç %72 güven ve %68 veri kalitesi eşiğini geçmelidir.</p></div>
-          )}
-          {(couponTab !== "READY" || couponRobotOpen) && coupons.map((coupon) => (
+          {coupons.map((coupon) => (
             <article className={`coupon-card status-${coupon.status.toLowerCase()}`} key={coupon.id}>
               <div className="coupon-head">
                 <div><span>{coupon.generated_for} · {couponStatusLabel(coupon.status)}{coupon.manually_reviewed ? " · Manuel kayıt" : ""}</span><strong>{coupon.label}</strong></div>
                 <b>{coupon.status === "WON" ? "✓" : coupon.status === "LOST" ? "×" : percentage(coupon.combined_probability)}</b>
               </div>
               <ol>
-                {coupon.selections.map((pick) => (
+                {coupon.selections.map((pick) => {
+                  const fixture = fixtureById.get(pick.fixture_id);
+                  const prediction = fixture ? bestPrediction(fixture) : undefined;
+                  return (
                   <li key={`${coupon.id}-${pick.position}`}>
                     <div>
                       <strong>{pick.home_team} – {pick.away_team}</strong>
+                      <span className="coupon-match-meta">{pick.competition} · {formatDate(pick.kickoff_utc)}</span>
                       <span>
                         {pick.market.toFixed(1)} {pick.selection === "UST" ? "Üst" : "Alt"}
                         {pick.home_goals !== null && pick.away_goals !== null ? ` · ${pick.home_goals}-${pick.away_goals}` : ""}
                       </span>
+                      {prediction && (
+                        <span>Beklenen {prediction.expected_total.toFixed(2)} gol · Veri kalitesi {percentage(prediction.data_quality)}</span>
+                      )}
                     </div>
                     <b className={pick.outcome ? `pick-${pick.outcome.toLowerCase()}` : ""}>
                       {pick.outcome === "WON" ? "✓" : pick.outcome === "LOST" ? "×" : percentage(pick.probability)}
                     </b>
                   </li>
-                ))}
+                  );
+                })}
               </ol>
               <div className="coupon-foot">
                 <span>Birleşik olasılık <strong>{percentage(coupon.combined_probability)}</strong></span>
@@ -606,11 +662,12 @@ export default function Dashboard() {
               </details>
             </article>
           ))}
+          </div>
           {manualMessage && <p className="manual-message" role="status">{manualMessage}</p>}
         </aside>
       </section>
 
-      <footer><span>Olasılık tahmindir, garanti değildir. Sistem riskli seçimleri zorla kupona eklemez.</span><span>Model: goal-poisson-2.1-timing</span></footer>
+      <footer><span>Olasılık tahmindir, garanti değildir. Banko ve Alternatif kuponlar güven düzeyine göre ayrı gösterilir.</span><span>Model: goal-poisson-2.1-timing</span></footer>
     </main>
   );
 }

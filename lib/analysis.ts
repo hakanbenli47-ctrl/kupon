@@ -519,9 +519,14 @@ async function buildCoupons(db: SqliteDb, generatedFor: string) {
     FROM predictions p JOIN fixtures f ON f.id = p.fixture_id
     WHERE p.is_active = 1 AND p.outcome IS NULL AND f.status IN ('SCHEDULED','TIMED','TBC')
       AND date(datetime(f.kickoff_utc, '+3 hours')) = date(?)
-      AND p.probability >= 0.72 AND p.data_quality >= 0.68
     ORDER BY (p.probability * 0.65 + p.data_quality * 0.25 + p.stats_coverage * 0.10) DESC
-  `, [generatedFor]) as unknown as { id: number; fixture_id: number; probability: number }[];
+  `, [generatedFor]) as unknown as Array<{
+    id: number;
+    fixture_id: number;
+    probability: number;
+    data_quality: number;
+    stats_coverage: number;
+  }>;
 
   const unique: typeof candidates = [];
   const seen = new Set<number>();
@@ -532,12 +537,33 @@ async function buildCoupons(db: SqliteDb, generatedFor: string) {
     }
   }
 
-  const groups = unique.length >= 9
-    ? [unique.slice(0, 5), unique.slice(5, 10)]
-    : unique.length >= 4
-      ? [unique.slice(0, 5)]
-      : [];
-  const validGroups = groups.filter((candidateGroup) => candidateGroup.length >= 4);
+  const groups: typeof candidates[] = [];
+  if (unique.length >= 4) {
+    const groupCount = Math.ceil(unique.length / 5);
+    const baseSize = Math.floor(unique.length / groupCount);
+    const largerGroups = unique.length % groupCount;
+    let cursor = 0;
+    for (let index = 0; index < groupCount; index += 1) {
+      const size = baseSize + (index < largerGroups ? 1 : 0);
+      const group = unique.slice(cursor, cursor + size);
+      for (const filler of unique) {
+        if (group.length >= 4) break;
+        if (!group.some((pick) => pick.fixture_id === filler.fixture_id)) group.push(filler);
+      }
+      groups.push(group);
+      cursor += size;
+    }
+  }
+
+  let bankoIndex = 0;
+  let alternativeIndex = 0;
+  const desiredGroups = groups.map((group) => {
+    const isBanko = group.every((pick) => pick.probability >= 0.72 && pick.data_quality >= 0.68);
+    const label = isBanko
+      ? `Banko ${bankoIndex += 1}`
+      : `Alternatif ${alternativeIndex += 1}`;
+    return { group, label };
+  });
   const existingRows = await db.all(`
     SELECT c.id, c.label, cs.prediction_id
     FROM coupons c
@@ -553,8 +579,7 @@ async function buildCoupons(db: SqliteDb, generatedFor: string) {
   }
 
   let created = 0;
-  for (const [index, group] of validGroups.entries()) {
-    const label = `Kupon ${index + 1}`;
+  for (const { group, label } of desiredGroups) {
     const existing = existingByLabel.get(label);
     const nextIds = group.map((pick) => Number(pick.id));
     const unchanged = existing
@@ -579,8 +604,7 @@ async function buildCoupons(db: SqliteDb, generatedFor: string) {
   }
 
   for (const [label, existing] of existingByLabel) {
-    const index = Number(label.replace("Kupon ", "")) - 1;
-    if (!validGroups[index]) {
+    if (!desiredGroups.some((candidate) => candidate.label === label)) {
       await db.run("UPDATE coupons SET status = 'SUPERSEDED' WHERE id = ?", [existing.id]);
     }
   }
