@@ -143,6 +143,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .coupon-card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 14px; }
 .coupon-card-grid .coupon-empty { grid-column: 1 / -1; }
 .coupon-card { margin-bottom: 12px; }
+.coupon-card.category-alternative { background: #43564a; }
 .coupon-card.status-won { background: #145f3e; }
 .coupon-card.status-lost { background: #63302c; }
 .coupon-card.status-pending { background: #50502a; }

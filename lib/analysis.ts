@@ -558,7 +558,7 @@ async function buildCoupons(db: SqliteDb, generatedFor: string) {
   let bankoIndex = 0;
   let alternativeIndex = 0;
   const desiredGroups = groups.map((group) => {
-    const isBanko = group.every((pick) => pick.probability >= 0.72 && pick.data_quality >= 0.68);
+    const isBanko = group.every((pick) => pick.probability >= 0.78 && pick.data_quality >= 0.75);
     const label = isBanko
       ? `Banko ${bankoIndex += 1}`
       : `Alternatif ${alternativeIndex += 1}`;

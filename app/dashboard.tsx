@@ -285,6 +285,12 @@ export default function Dashboard() {
     if (couponTab === "SELECTED") return selected;
     if (couponTab === "HISTORY") return coupon.status !== "ACTIVE";
     return coupon.status === "ACTIVE" && coupon.generated_for === today;
+  }).sort((left, right) => {
+    if (couponTab !== "READY") return 0;
+    const leftAlternative = left.label.startsWith("Alternatif") ? 1 : 0;
+    const rightAlternative = right.label.startsWith("Alternatif") ? 1 : 0;
+    if (leftAlternative !== rightAlternative) return leftAlternative - rightAlternative;
+    return Number(left.label.match(/\d+/)?.[0] || 0) - Number(right.label.match(/\d+/)?.[0] || 0);
   }), [couponTab, data, selectedCouponIds, today]);
   const fixtureById = useMemo(
     () => new Map((data?.fixtures || []).map((fixture) => [fixture.id, fixture])),
@@ -582,7 +588,7 @@ export default function Dashboard() {
             <div className="coupon-empty"><span className="coupon-number">0</span><strong>Bu bölümde kupon yok</strong><p>Bugün en az dört analiz hazır olduğunda robot 4–5 maçlık grupları oluşturur.</p></div>
           )}
           {coupons.map((coupon) => (
-            <article className={`coupon-card status-${coupon.status.toLowerCase()}`} key={coupon.id}>
+            <article className={`coupon-card status-${coupon.status.toLowerCase()} category-${coupon.label.startsWith("Alternatif") ? "alternative" : "banko"}`} key={coupon.id}>
               <div className="coupon-head">
                 <div><span>{coupon.generated_for} · {couponStatusLabel(coupon.status)}{coupon.manually_reviewed ? " · Manuel kayıt" : ""}</span><strong>{coupon.label}</strong></div>
                 <b>{coupon.status === "WON" ? "✓" : coupon.status === "LOST" ? "×" : percentage(coupon.combined_probability)}</b>
