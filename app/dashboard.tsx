@@ -294,11 +294,17 @@ export default function Dashboard() {
     setManualMessage("");
     localStorage.setItem("manualEntryToken", manualToken);
     try {
-      const results = coupon.selections.map((pick) => ({
-        fixtureId: pick.fixture_id,
-        homeGoals: Number(scoreDrafts[pick.fixture_id]?.home ?? pick.home_goals),
-        awayGoals: Number(scoreDrafts[pick.fixture_id]?.away ?? pick.away_goals),
-      }));
+      const results = coupon.selections.map((pick) => {
+        const homeValue = scoreDrafts[pick.fixture_id]?.home
+          ?? (pick.home_goals === null ? "" : String(pick.home_goals));
+        const awayValue = scoreDrafts[pick.fixture_id]?.away
+          ?? (pick.away_goals === null ? "" : String(pick.away_goals));
+        return {
+          fixtureId: pick.fixture_id,
+          homeGoals: homeValue === "" ? null : Number(homeValue),
+          awayGoals: awayValue === "" ? null : Number(awayValue),
+        };
+      });
       const response = await fetch("/api/manual-result", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-admin-token": manualToken },
