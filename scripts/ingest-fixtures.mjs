@@ -14,6 +14,20 @@ const dbPath = process.env.KUPON_DB_PATH || path.join(root, "data", "kupon.db");
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new DatabaseSync(dbPath);
 db.exec(fs.readFileSync(path.join(root, "lib", "schema.sql"), "utf8"));
+for (const [column, type] of [
+  ["home_attacks", "INTEGER"], ["away_attacks", "INTEGER"],
+  ["home_pass_accuracy", "REAL"], ["away_pass_accuracy", "REAL"],
+  ["home_passes_completed", "INTEGER"], ["away_passes_completed", "INTEGER"],
+  ["home_passes_attempted", "INTEGER"], ["away_passes_attempted", "INTEGER"],
+  ["home_balls_recovered", "INTEGER"], ["away_balls_recovered", "INTEGER"],
+  ["home_saves", "INTEGER"], ["away_saves", "INTEGER"],
+  ["home_big_chances", "INTEGER"], ["away_big_chances", "INTEGER"],
+  ["home_xg", "REAL"], ["away_xg", "REAL"],
+]) {
+  if (!db.prepare("PRAGMA table_info(match_stats)").all().some((item) => item.name === column)) {
+    db.exec(`ALTER TABLE match_stats ADD COLUMN ${column} ${type}`);
+  }
+}
 
 const payload = JSON.parse(fs.readFileSync(path.resolve(inputPath), "utf8"));
 const fixtures = Array.isArray(payload) ? payload : payload.fixtures;
@@ -31,7 +45,9 @@ const insertFixture = db.prepare(`
 const updateFixture = db.prepare(`
   UPDATE fixtures SET competition_code = ?, kickoff_utc = ?, home_team_id = ?, away_team_id = ?, status = ?,
     home_goals = ?, away_goals = ?, stage = ?, source_name = ?, source_url = ?, source_checked_at = ?, updated_at = CURRENT_TIMESTAMP
-  WHERE external_id = ?
+  WHERE external_id = ? AND NOT EXISTS (
+    SELECT 1 FROM manual_fixture_results mr WHERE mr.fixture_id = fixtures.id
+  )
 `);
 const insertPlayer = db.prepare(`
   INSERT INTO player_availability(fixture_id, team_id, player_name, availability, reason, attack_impact, defense_impact, source_url, checked_at)
@@ -44,8 +60,12 @@ const upsertStats = db.prepare(`
   INSERT INTO match_stats(
     fixture_id, home_shots, away_shots, home_shots_on_target, away_shots_on_target,
     home_corners, away_corners, home_possession, away_possession, home_fouls, away_fouls,
-    home_yellow_cards, away_yellow_cards, home_red_cards, away_red_cards, source_url, checked_at
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    home_yellow_cards, away_yellow_cards, home_red_cards, away_red_cards,
+    home_attacks, away_attacks, home_pass_accuracy, away_pass_accuracy,
+    home_passes_completed, away_passes_completed, home_passes_attempted, away_passes_attempted,
+    home_balls_recovered, away_balls_recovered, home_saves, away_saves,
+    home_big_chances, away_big_chances, home_xg, away_xg, source_url, checked_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(fixture_id) DO UPDATE SET
     home_shots=excluded.home_shots, away_shots=excluded.away_shots,
     home_shots_on_target=excluded.home_shots_on_target, away_shots_on_target=excluded.away_shots_on_target,
@@ -54,6 +74,14 @@ const upsertStats = db.prepare(`
     home_fouls=excluded.home_fouls, away_fouls=excluded.away_fouls,
     home_yellow_cards=excluded.home_yellow_cards, away_yellow_cards=excluded.away_yellow_cards,
     home_red_cards=excluded.home_red_cards, away_red_cards=excluded.away_red_cards,
+    home_attacks=excluded.home_attacks, away_attacks=excluded.away_attacks,
+    home_pass_accuracy=excluded.home_pass_accuracy, away_pass_accuracy=excluded.away_pass_accuracy,
+    home_passes_completed=excluded.home_passes_completed, away_passes_completed=excluded.away_passes_completed,
+    home_passes_attempted=excluded.home_passes_attempted, away_passes_attempted=excluded.away_passes_attempted,
+    home_balls_recovered=excluded.home_balls_recovered, away_balls_recovered=excluded.away_balls_recovered,
+    home_saves=excluded.home_saves, away_saves=excluded.away_saves,
+    home_big_chances=excluded.home_big_chances, away_big_chances=excluded.away_big_chances,
+    home_xg=excluded.home_xg, away_xg=excluded.away_xg,
     source_url=excluded.source_url, checked_at=excluded.checked_at
 `);
 
@@ -114,7 +142,13 @@ try {
         value("home_shots"), value("away_shots"), value("home_shots_on_target"), value("away_shots_on_target"),
         value("home_corners"), value("away_corners"), value("home_possession"), value("away_possession"),
         value("home_fouls"), value("away_fouls"), value("home_yellow_cards"), value("away_yellow_cards"),
-        value("home_red_cards"), value("away_red_cards"), String(item.stats.source_url || sourceUrl),
+        value("home_red_cards"), value("away_red_cards"),
+        value("home_attacks"), value("away_attacks"), value("home_pass_accuracy"), value("away_pass_accuracy"),
+        value("home_passes_completed"), value("away_passes_completed"),
+        value("home_passes_attempted"), value("away_passes_attempted"),
+        value("home_balls_recovered"), value("away_balls_recovered"),
+        value("home_saves"), value("away_saves"), value("home_big_chances"), value("away_big_chances"),
+        value("home_xg"), value("away_xg"), String(item.stats.source_url || sourceUrl),
         new Date(item.stats.checked_at || checkedAt).toISOString(),
       );
     }

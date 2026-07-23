@@ -9,6 +9,7 @@ type Prediction = {
   probability: number;
   expected_total: number;
   data_quality: number;
+  stats_coverage: number;
   sample_home: number;
   sample_away: number;
   sample_h2h: number;
@@ -35,8 +36,10 @@ type Coupon = {
   combined_probability: number;
   risk: string;
   status: "ACTIVE" | "PENDING" | "WON" | "LOST";
+  manually_reviewed: boolean;
   selections: Array<{
     position: number;
+    fixture_id: number;
     market: number;
     selection: "ALT" | "UST";
     probability: number;
@@ -180,6 +183,11 @@ export default function Dashboard() {
   const [error, setError] = useState("");
   const [couponTab, setCouponTab] = useState<CouponTab>("READY");
   const [selectedCouponIds, setSelectedCouponIds] = useState<number[]>([]);
+  const [couponRobotOpen, setCouponRobotOpen] = useState(false);
+  const [manualToken, setManualToken] = useState("");
+  const [scoreDrafts, setScoreDrafts] = useState<Record<number, { home: string; away: string }>>({});
+  const [savingCouponId, setSavingCouponId] = useState<number | null>(null);
+  const [manualMessage, setManualMessage] = useState("");
 
   useEffect(() => {
     let storedIds: number[] = [];
@@ -189,7 +197,11 @@ export default function Dashboard() {
     } catch {
       localStorage.removeItem("selectedCouponIds");
     }
-    const timer = window.setTimeout(() => setSelectedCouponIds(storedIds), 0);
+    const storedToken = localStorage.getItem("manualEntryToken") || "";
+    const timer = window.setTimeout(() => {
+      setSelectedCouponIds(storedIds);
+      setManualToken(storedToken);
+    }, 0);
     return () => window.clearTimeout(timer);
   }, []);
 
@@ -266,10 +278,42 @@ export default function Dashboard() {
     const selected = selectedCouponIds.includes(coupon.id);
     if (couponTab === "SELECTED") return selected;
     if (couponTab === "HISTORY") return coupon.status !== "ACTIVE";
-    const dateMatches = matchesDateRange(`${coupon.generated_for}T12:00:00+03:00`, dateRange, customDate, today);
-    const leagueMatches = league === "ALL" || coupon.selections.some((pick) => pick.competition_code === league);
-    return coupon.status === "ACTIVE" && dateMatches && leagueMatches;
-  }), [couponTab, customDate, data, dateRange, league, selectedCouponIds, today]);
+    return coupon.status === "ACTIVE" && coupon.generated_for === today;
+  }), [couponTab, data, selectedCouponIds, today]);
+
+  const updateScore = (fixtureId: number, side: "home" | "away", value: string) => {
+    if (value !== "" && !/^\d{1,2}$/.test(value)) return;
+    setScoreDrafts((current) => {
+      const previous = current[fixtureId] || { home: "", away: "" };
+      return { ...current, [fixtureId]: { ...previous, [side]: value } };
+    });
+  };
+
+  const saveManualResult = async (coupon: Coupon, status: "WON" | "LOST") => {
+    setSavingCouponId(coupon.id);
+    setManualMessage("");
+    localStorage.setItem("manualEntryToken", manualToken);
+    try {
+      const results = coupon.selections.map((pick) => ({
+        fixtureId: pick.fixture_id,
+        homeGoals: Number(scoreDrafts[pick.fixture_id]?.home ?? pick.home_goals),
+        awayGoals: Number(scoreDrafts[pick.fixture_id]?.away ?? pick.away_goals),
+      }));
+      const response = await fetch("/api/manual-result", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-admin-token": manualToken },
+        body: JSON.stringify({ couponId: coupon.id, status, results }),
+      });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Sonuç kaydedilemedi.");
+      setManualMessage("Skorlar ve kupon sonucu kalıcı veri havuzuna kaydedildi.");
+      await load();
+    } catch (saveError) {
+      setManualMessage(saveError instanceof Error ? saveError.message : "Sonuç kaydedilemedi.");
+    } finally {
+      setSavingCouponId(null);
+    }
+  };
 
   const toggleCoupon = (couponId: number) => {
     setSelectedCouponIds((current) => {
@@ -441,6 +485,12 @@ export default function Dashboard() {
                         <span><b>İsabetli şut</b>{detail.home_avg_shots_on_target?.toFixed(1) ?? "—"} / {detail.away_avg_shots_on_target?.toFixed(1) ?? "—"}</span>
                         <span><b>Korner</b>{detail.home_avg_corners?.toFixed(1) ?? "—"} / {detail.away_avg_corners?.toFixed(1) ?? "—"}</span>
                         <span><b>Topa sahip olma</b>{detail.home_avg_possession?.toFixed(0) ?? "—"}% / {detail.away_avg_possession?.toFixed(0) ?? "—"}%</span>
+                        <span><b>Atak</b>{detail.home_avg_attacks?.toFixed(0) ?? "—"} / {detail.away_avg_attacks?.toFixed(0) ?? "—"}</span>
+                        <span><b>Pas isabeti</b>{detail.home_pass_accuracy?.toFixed(0) ?? "—"}% / {detail.away_pass_accuracy?.toFixed(0) ?? "—"}%</span>
+                        <span><b>Top kazanma</b>{detail.home_recoveries?.toFixed(0) ?? "—"} / {detail.away_recoveries?.toFixed(0) ?? "—"}</span>
+                        <span><b>Rakibe verilen isabetli şut</b>{detail.home_sot_allowed?.toFixed(1) ?? "—"} / {detail.away_sot_allowed?.toFixed(1) ?? "—"}</span>
+                        <span><b>Detay veri kapsamı</b>{percentage(best.stats_coverage)}</span>
+                        <span><b>Veri kalitesi</b>{percentage(best.data_quality)}</span>
                         <span><b>Beklenen toplam</b>{best.expected_total.toFixed(2)} gol</span>
                       </div>
                     </details>
@@ -453,18 +503,28 @@ export default function Dashboard() {
 
         <aside className="coupon-section">
           <div className="section-heading"><div><p className="eyebrow">OTOMATİK SEÇİM</p><h2>Kupon Robotu</h2></div></div>
+          <button
+            type="button"
+            className="robot-button"
+            onClick={() => { setCouponRobotOpen(true); setCouponTab("READY"); }}
+          >
+            Bugünün Kuponunu Getir
+          </button>
           <div className="coupon-tabs" role="tablist" aria-label="Kupon görünümü">
-            <button type="button" className={couponTab === "READY" ? "active" : ""} onClick={() => setCouponTab("READY")}>Hazır</button>
+            <button type="button" className={couponTab === "READY" ? "active" : ""} onClick={() => setCouponTab("READY")}>Bugün</button>
             <button type="button" className={couponTab === "SELECTED" ? "active" : ""} onClick={() => setCouponTab("SELECTED")}>Seçtiklerim ({selectedCouponIds.length})</button>
             <button type="button" className={couponTab === "HISTORY" ? "active" : ""} onClick={() => setCouponTab("HISTORY")}>Geçmiş</button>
           </div>
-          {!coupons.length && (
-            <div className="coupon-empty"><span className="coupon-number">0</span><strong>Bu bölümde kupon yok</strong><p>Hazır kupon için en az dört maç %72 güven ve veri kalitesi eşiğini geçmelidir.</p></div>
+          {couponTab === "READY" && !couponRobotOpen && (
+            <div className="coupon-empty"><span className="coupon-number">K</span><strong>Robot hazır</strong><p>Yalnızca bugünün düşük risk eşiğini geçen 4–5 maçlık kuponlarını görmek için düğmeye bas.</p></div>
           )}
-          {coupons.map((coupon) => (
+          {(couponTab !== "READY" || couponRobotOpen) && !coupons.length && (
+            <div className="coupon-empty"><span className="coupon-number">0</span><strong>Bu bölümde kupon yok</strong><p>Robot zorla seçim üretmez. En az dört maç %72 güven ve %68 veri kalitesi eşiğini geçmelidir.</p></div>
+          )}
+          {(couponTab !== "READY" || couponRobotOpen) && coupons.map((coupon) => (
             <article className={`coupon-card status-${coupon.status.toLowerCase()}`} key={coupon.id}>
               <div className="coupon-head">
-                <div><span>{coupon.generated_for} · {couponStatusLabel(coupon.status)}</span><strong>{coupon.label}</strong></div>
+                <div><span>{coupon.generated_for} · {couponStatusLabel(coupon.status)}{coupon.manually_reviewed ? " · Manuel kayıt" : ""}</span><strong>{coupon.label}</strong></div>
                 <b>{coupon.status === "WON" ? "✓" : coupon.status === "LOST" ? "×" : percentage(coupon.combined_probability)}</b>
               </div>
               <ol>
@@ -489,12 +549,56 @@ export default function Dashboard() {
                   {selectedCouponIds.includes(coupon.id) ? "Seçimi kaldır" : "Kuponu seç"}
                 </button>
               </div>
+              <details className="manual-result">
+                <summary>Skorları ve kupon sonucunu elle gir</summary>
+                <label>
+                  <span>Yönetici anahtarı</span>
+                  <input
+                    type="password"
+                    value={manualToken}
+                    onChange={(event) => setManualToken(event.target.value)}
+                    placeholder="Gizli anahtar"
+                    autoComplete="current-password"
+                  />
+                </label>
+                <div className="score-grid">
+                  {coupon.selections.map((pick) => (
+                    <div className="score-row" key={`score-${coupon.id}-${pick.fixture_id}`}>
+                      <span>{pick.home_team} – {pick.away_team}</span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="30"
+                        inputMode="numeric"
+                        aria-label={`${pick.home_team} gol`}
+                        value={scoreDrafts[pick.fixture_id]?.home ?? (pick.home_goals ?? "")}
+                        onChange={(event) => updateScore(pick.fixture_id, "home", event.target.value)}
+                      />
+                      <b>–</b>
+                      <input
+                        type="number"
+                        min="0"
+                        max="30"
+                        inputMode="numeric"
+                        aria-label={`${pick.away_team} gol`}
+                        value={scoreDrafts[pick.fixture_id]?.away ?? (pick.away_goals ?? "")}
+                        onChange={(event) => updateScore(pick.fixture_id, "away", event.target.value)}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="manual-actions">
+                  <button type="button" disabled={savingCouponId === coupon.id} onClick={() => saveManualResult(coupon, "WON")}>Kupon tuttu</button>
+                  <button type="button" disabled={savingCouponId === coupon.id} onClick={() => saveManualResult(coupon, "LOST")}>Kupon tutmadı</button>
+                </div>
+              </details>
             </article>
           ))}
+          {manualMessage && <p className="manual-message" role="status">{manualMessage}</p>}
         </aside>
       </section>
 
-      <footer><span>Olasılık tahmindir, garanti değildir. Sistem riskli seçimleri zorla kupona eklemez.</span><span>Model: goal-poisson-1.1</span></footer>
+      <footer><span>Olasılık tahmindir, garanti değildir. Sistem riskli seçimleri zorla kupona eklemez.</span><span>Model: goal-poisson-2.0</span></footer>
     </main>
   );
 }

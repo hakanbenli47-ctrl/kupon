@@ -65,6 +65,31 @@ async function initializeSchema(activeClient: Client) {
         .replace(/^PRAGMA\s+journal_mode\s*=.*;\s*$/gim, "")
         .replace(/^PRAGMA\s+foreign_keys\s*=.*;\s*$/gim, "");
       await activeClient.executeMultiple(schema);
+      const migrations = [
+        ["match_stats", "home_attacks", "INTEGER"],
+        ["match_stats", "away_attacks", "INTEGER"],
+        ["match_stats", "home_pass_accuracy", "REAL"],
+        ["match_stats", "away_pass_accuracy", "REAL"],
+        ["match_stats", "home_passes_completed", "INTEGER"],
+        ["match_stats", "away_passes_completed", "INTEGER"],
+        ["match_stats", "home_passes_attempted", "INTEGER"],
+        ["match_stats", "away_passes_attempted", "INTEGER"],
+        ["match_stats", "home_balls_recovered", "INTEGER"],
+        ["match_stats", "away_balls_recovered", "INTEGER"],
+        ["match_stats", "home_saves", "INTEGER"],
+        ["match_stats", "away_saves", "INTEGER"],
+        ["match_stats", "home_big_chances", "INTEGER"],
+        ["match_stats", "away_big_chances", "INTEGER"],
+        ["match_stats", "home_xg", "REAL"],
+        ["match_stats", "away_xg", "REAL"],
+        ["predictions", "stats_coverage", "REAL NOT NULL DEFAULT 0"],
+      ] as const;
+      for (const [table, column, definition] of migrations) {
+        const columns = await activeClient.execute(`PRAGMA table_info(${table})`);
+        if (!columns.rows.some((row) => String(row.name) === column)) {
+          await activeClient.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        }
+      }
     })().catch((error) => {
       initialized = null;
       throw error;

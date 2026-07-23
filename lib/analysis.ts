@@ -3,7 +3,7 @@ import "server-only";
 import { getDb, SqliteDb, withTransaction } from "./db";
 import { ensureSeedData } from "./seed";
 
-const MODEL_VERSION = "goal-poisson-1.1";
+const MODEL_VERSION = "goal-poisson-2.0";
 const MARKETS = [1.5, 2.5, 3.5] as const;
 
 type MatchRow = {
@@ -20,6 +20,18 @@ type MatchRow = {
   away_corners?: number | null;
   home_possession?: number | null;
   away_possession?: number | null;
+  home_attacks?: number | null;
+  away_attacks?: number | null;
+  home_pass_accuracy?: number | null;
+  away_pass_accuracy?: number | null;
+  home_balls_recovered?: number | null;
+  away_balls_recovered?: number | null;
+  home_saves?: number | null;
+  away_saves?: number | null;
+  home_big_chances?: number | null;
+  away_big_chances?: number | null;
+  home_xg?: number | null;
+  away_xg?: number | null;
 };
 
 type FixtureRow = {
@@ -40,6 +52,13 @@ function mean(values: number[], fallback: number) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : fallback;
 }
 
+function recencyMean(values: number[], fallback: number) {
+  if (!values.length) return fallback;
+  const weights = values.map((_, index) => Math.max(1, values.length - index));
+  return values.reduce((sum, value, index) => sum + value * weights[index], 0)
+    / weights.reduce((sum, weight) => sum + weight, 0);
+}
+
 function poissonCdf(maxGoals: number, lambda: number) {
   let term = Math.exp(-lambda);
   let total = term;
@@ -57,14 +76,33 @@ function teamPerspective(match: MatchRow, teamId: number) {
     conceded: isHome ? match.away_goals : match.home_goals,
     total: match.home_goals + match.away_goals,
     shots: isHome ? match.home_shots : match.away_shots,
+    shotsAgainst: isHome ? match.away_shots : match.home_shots,
     shotsOnTarget: isHome ? match.home_shots_on_target : match.away_shots_on_target,
+    shotsOnTargetAgainst: isHome ? match.away_shots_on_target : match.home_shots_on_target,
     corners: isHome ? match.home_corners : match.away_corners,
     possession: isHome ? match.home_possession : match.away_possession,
+    attacks: isHome ? match.home_attacks : match.away_attacks,
+    passAccuracy: isHome ? match.home_pass_accuracy : match.away_pass_accuracy,
+    ballsRecovered: isHome ? match.home_balls_recovered : match.away_balls_recovered,
+    saves: isHome ? match.home_saves : match.away_saves,
+    bigChances: isHome ? match.home_big_chances : match.away_big_chances,
+    xg: isHome ? match.home_xg : match.away_xg,
   };
 }
 
 function present(values: Array<number | null | undefined>) {
   return values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+}
+
+function istanbulDateKey(value: string) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Istanbul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(value));
+  const pick = (type: string) => parts.find((part) => part.type === type)?.value || "";
+  return `${pick("year")}-${pick("month")}-${pick("day")}`;
 }
 
 async function calibration(db: SqliteDb, competition: string, market: number, selection: string, raw: number) {
@@ -91,7 +129,10 @@ async function recentMatches(db: SqliteDb, teamId: number, before: string, venue
   return await db.all(`
     SELECT f.id, f.home_team_id, f.away_team_id, f.home_goals, f.away_goals,
            ms.home_shots, ms.away_shots, ms.home_shots_on_target, ms.away_shots_on_target,
-           ms.home_corners, ms.away_corners, ms.home_possession, ms.away_possession
+           ms.home_corners, ms.away_corners, ms.home_possession, ms.away_possession,
+           ms.home_attacks, ms.away_attacks, ms.home_pass_accuracy, ms.away_pass_accuracy,
+           ms.home_balls_recovered, ms.away_balls_recovered, ms.home_saves, ms.away_saves,
+           ms.home_big_chances, ms.away_big_chances, ms.home_xg, ms.away_xg
     FROM fixtures f LEFT JOIN match_stats ms ON ms.fixture_id = f.id
     WHERE f.status = 'FINISHED' AND f.kickoff_utc < ?
       AND (f.home_team_id = ? OR f.away_team_id = ?)
@@ -141,7 +182,10 @@ async function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
   const h2h = await db.all(`
     SELECT f.id, f.home_team_id, f.away_team_id, f.home_goals, f.away_goals,
            ms.home_shots, ms.away_shots, ms.home_shots_on_target, ms.away_shots_on_target,
-           ms.home_corners, ms.away_corners, ms.home_possession, ms.away_possession
+           ms.home_corners, ms.away_corners, ms.home_possession, ms.away_possession,
+           ms.home_attacks, ms.away_attacks, ms.home_pass_accuracy, ms.away_pass_accuracy,
+           ms.home_balls_recovered, ms.away_balls_recovered, ms.home_saves, ms.away_saves,
+           ms.home_big_chances, ms.away_big_chances, ms.home_xg, ms.away_xg
     FROM fixtures f LEFT JOIN match_stats ms ON ms.fixture_id = f.id
     WHERE f.status = 'FINISHED' AND f.kickoff_utc < ?
       AND ((f.home_team_id = ? AND f.away_team_id = ?) OR (f.home_team_id = ? AND f.away_team_id = ?))
@@ -160,13 +204,13 @@ async function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
   const hvp = homeVenue.map((match) => teamPerspective(match, fixture.home_team_id));
   const avp = awayVenue.map((match) => teamPerspective(match, fixture.away_team_id));
 
-  const homeAttack = mean(hp.map((x) => x.scored), baseline.home) * 0.8
+  const homeAttack = recencyMean(hp.map((x) => x.scored), baseline.home) * 0.8
     + mean(hvp.map((x) => x.scored), baseline.home) * 0.2;
-  const awayDefense = mean(ap.map((x) => x.conceded), baseline.home) * 0.8
+  const awayDefense = recencyMean(ap.map((x) => x.conceded), baseline.home) * 0.8
     + mean(avp.map((x) => x.conceded), baseline.home) * 0.2;
-  const awayAttack = mean(ap.map((x) => x.scored), baseline.away) * 0.8
+  const awayAttack = recencyMean(ap.map((x) => x.scored), baseline.away) * 0.8
     + mean(avp.map((x) => x.scored), baseline.away) * 0.2;
-  const homeDefense = mean(hp.map((x) => x.conceded), baseline.away) * 0.8
+  const homeDefense = recencyMean(hp.map((x) => x.conceded), baseline.away) * 0.8
     + mean(hvp.map((x) => x.conceded), baseline.away) * 0.2;
 
   let expectedHome = homeAttack * 0.52 + awayDefense * 0.33 + baseline.home * 0.15;
@@ -180,15 +224,49 @@ async function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
   const awayCorners = mean(present(ap.map((x) => x.corners)), 4.5);
   const homePossession = mean(present(hp.map((x) => x.possession)), 50);
   const awayPossession = mean(present(ap.map((x) => x.possession)), 50);
+  const homeAttacks = mean(present(hp.map((x) => x.attacks)), 85);
+  const awayAttacks = mean(present(ap.map((x) => x.attacks)), 80);
+  const homePassAccuracy = mean(present(hp.map((x) => x.passAccuracy)), 78);
+  const awayPassAccuracy = mean(present(ap.map((x) => x.passAccuracy)), 76);
+  const homeRecoveries = mean(present(hp.map((x) => x.ballsRecovered)), 40);
+  const awayRecoveries = mean(present(ap.map((x) => x.ballsRecovered)), 40);
+  const homeBigChances = mean(present(hp.map((x) => x.bigChances)), 1.5);
+  const awayBigChances = mean(present(ap.map((x) => x.bigChances)), 1.3);
+  const homeXg = mean(present(hp.map((x) => x.xg)), homeAttack);
+  const awayXg = mean(present(ap.map((x) => x.xg)), awayAttack);
+  const homeSotAllowed = mean(present(hp.map((x) => x.shotsOnTargetAgainst)), 4);
+  const awaySotAllowed = mean(present(ap.map((x) => x.shotsOnTargetAgainst)), 4.5);
+  const statSeries = [
+    [...hp.map((x) => x.shots), ...ap.map((x) => x.shots)],
+    [...hp.map((x) => x.shotsOnTarget), ...ap.map((x) => x.shotsOnTarget)],
+    [...hp.map((x) => x.corners), ...ap.map((x) => x.corners)],
+    [...hp.map((x) => x.possession), ...ap.map((x) => x.possession)],
+    [...hp.map((x) => x.attacks), ...ap.map((x) => x.attacks)],
+    [...hp.map((x) => x.passAccuracy), ...ap.map((x) => x.passAccuracy)],
+    [...hp.map((x) => x.ballsRecovered), ...ap.map((x) => x.ballsRecovered)],
+    [...hp.map((x) => x.xg), ...ap.map((x) => x.xg)],
+  ];
   const statsCoverage = (
-    present([...hp.map((x) => x.shots), ...ap.map((x) => x.shots)]).length +
-    present([...hp.map((x) => x.shotsOnTarget), ...ap.map((x) => x.shotsOnTarget)]).length +
-    present([...hp.map((x) => x.corners), ...ap.map((x) => x.corners)]).length
-  ) / Math.max(1, (hp.length + ap.length) * 3);
+    statSeries.reduce((total, values) => total + present(values).length, 0)
+  ) / Math.max(1, (hp.length + ap.length) * statSeries.length);
 
-  if (statsCoverage >= 0.4) {
-    const homePressure = clamp((homeSot - 4.5) * 0.025 + (homeShots - 12) * 0.006 + (homeCorners - 5) * 0.008, -0.1, 0.1);
-    const awayPressure = clamp((awaySot - 4.0) * 0.025 + (awayShots - 11) * 0.006 + (awayCorners - 4.5) * 0.008, -0.1, 0.1);
+  if (statsCoverage >= 0.2) {
+    const homePressure = clamp(
+      (homeSot - 4.5) * 0.018 + (homeShots - 12) * 0.004 + (homeCorners - 5) * 0.006
+      + (homeAttacks - 85) * 0.001 + (homePassAccuracy - 78) * 0.002
+      + (homeBigChances - 1.5) * 0.025 + (homeXg - homeAttack) * 0.05
+      + (awaySotAllowed - 4.5) * 0.012,
+      -0.14,
+      0.14,
+    );
+    const awayPressure = clamp(
+      (awaySot - 4.0) * 0.018 + (awayShots - 11) * 0.004 + (awayCorners - 4.5) * 0.006
+      + (awayAttacks - 80) * 0.001 + (awayPassAccuracy - 76) * 0.002
+      + (awayBigChances - 1.3) * 0.025 + (awayXg - awayAttack) * 0.05
+      + (homeSotAllowed - 4) * 0.012,
+      -0.14,
+      0.14,
+    );
     expectedHome *= 1 + homePressure;
     expectedAway *= 1 + awayPressure;
   }
@@ -215,7 +293,12 @@ async function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
 
   const lambda = expectedHome + expectedAway;
   const dataQuality = clamp(
-    0.48 + Math.min(homeRecent.length, awayRecent.length) * 0.05 + Math.min(h2h.length, 3) * 0.025 + Math.min(baseline.total, 100) / 1000 + statsCoverage * 0.07,
+    0.38
+      + Math.min(homeRecent.length, awayRecent.length) * 0.055
+      + Math.min(homeVenue.length, awayVenue.length, 5) * 0.018
+      + Math.min(h2h.length, 3) * 0.018
+      + Math.min(baseline.total, 100) / 1250
+      + statsCoverage * 0.18,
     0,
     1,
   );
@@ -233,16 +316,17 @@ async function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
       probability,
       expectedTotal: lambda,
       dataQuality,
+      statsCoverage,
       sampleHome: homeRecent.length,
       sampleAway: awayRecent.length,
       sampleH2h: h2h.length,
       explanation: {
         expected_home: expectedHome,
         expected_away: expectedAway,
-        home_last5_for: mean(hp.map((x) => x.scored), 0),
-        home_last5_against: mean(hp.map((x) => x.conceded), 0),
-        away_last5_for: mean(ap.map((x) => x.scored), 0),
-        away_last5_against: mean(ap.map((x) => x.conceded), 0),
+        home_last5_for: recencyMean(hp.map((x) => x.scored), 0),
+        home_last5_against: recencyMean(hp.map((x) => x.conceded), 0),
+        away_last5_for: recencyMean(ap.map((x) => x.scored), 0),
+        away_last5_against: recencyMean(ap.map((x) => x.conceded), 0),
         h2h_total_average: h2h.length ? mean(h2h.map((x) => x.home_goals + x.away_goals), 0) : null,
         h2h_weight: h2hWeight,
         home_avg_shots: present(hp.map((x) => x.shots)).length ? homeShots : null,
@@ -253,6 +337,16 @@ async function analyzeFixture(db: SqliteDb, fixture: FixtureRow) {
         away_avg_corners: present(ap.map((x) => x.corners)).length ? awayCorners : null,
         home_avg_possession: present(hp.map((x) => x.possession)).length ? homePossession : null,
         away_avg_possession: present(ap.map((x) => x.possession)).length ? awayPossession : null,
+        home_avg_attacks: present(hp.map((x) => x.attacks)).length ? homeAttacks : null,
+        away_avg_attacks: present(ap.map((x) => x.attacks)).length ? awayAttacks : null,
+        home_pass_accuracy: present(hp.map((x) => x.passAccuracy)).length ? homePassAccuracy : null,
+        away_pass_accuracy: present(ap.map((x) => x.passAccuracy)).length ? awayPassAccuracy : null,
+        home_recoveries: present(hp.map((x) => x.ballsRecovered)).length ? homeRecoveries : null,
+        away_recoveries: present(ap.map((x) => x.ballsRecovered)).length ? awayRecoveries : null,
+        home_sot_allowed: present(hp.map((x) => x.shotsOnTargetAgainst)).length ? homeSotAllowed : null,
+        away_sot_allowed: present(ap.map((x) => x.shotsOnTargetAgainst)).length ? awaySotAllowed : null,
+        home_xg: present(hp.map((x) => x.xg)).length ? homeXg : null,
+        away_xg: present(ap.map((x) => x.xg)).length ? awayXg : null,
         stats_coverage: statsCoverage,
       },
     };
@@ -319,11 +413,12 @@ async function settleCoupons(db: SqliteDb) {
 
 async function buildCoupons(db: SqliteDb, generatedFor: string) {
   const candidates = await db.all(`
-    SELECT p.id, p.fixture_id, p.probability, p.data_quality, f.kickoff_utc
+    SELECT p.id, p.fixture_id, p.probability, p.data_quality, p.stats_coverage, f.kickoff_utc
     FROM predictions p JOIN fixtures f ON f.id = p.fixture_id
     WHERE p.is_active = 1 AND p.outcome IS NULL AND f.status IN ('SCHEDULED','TIMED','TBC')
-      AND date(f.kickoff_utc) = date(?) AND p.probability >= 0.72 AND p.data_quality >= 0.65
-    ORDER BY p.probability DESC, p.data_quality DESC
+      AND date(datetime(f.kickoff_utc, '+3 hours')) = date(?)
+      AND p.probability >= 0.72 AND p.data_quality >= 0.68
+    ORDER BY (p.probability * 0.65 + p.data_quality * 0.25 + p.stats_coverage * 0.10) DESC
   `, [generatedFor]) as unknown as { id: number; fixture_id: number; probability: number }[];
 
   const unique: typeof candidates = [];
@@ -335,7 +430,11 @@ async function buildCoupons(db: SqliteDb, generatedFor: string) {
     }
   }
 
-  const groups = unique.length >= 8 ? [unique.slice(0, 5), unique.slice(5, 10)] : unique.length >= 4 ? [unique.slice(0, 5)] : [];
+  const groups = unique.length >= 9
+    ? [unique.slice(0, 5), unique.slice(5, 10)]
+    : unique.length >= 4
+      ? [unique.slice(0, 5)]
+      : [];
   const validGroups = groups.filter((candidateGroup) => candidateGroup.length >= 4);
   const existingRows = await db.all(`
     SELECT c.id, c.label, cs.prediction_id
@@ -423,6 +522,7 @@ export async function runAnalysis(days = 15) {
           prediction.probability,
           prediction.expectedTotal,
           prediction.dataQuality,
+          prediction.statsCoverage,
           prediction.sampleHome,
           prediction.sampleAway,
           prediction.sampleH2h,
@@ -434,7 +534,7 @@ export async function runAnalysis(days = 15) {
           return db.run(`
             UPDATE predictions
             SET selection = ?, raw_probability = ?, probability = ?, expected_total = ?,
-                data_quality = ?, sample_home = ?, sample_away = ?, sample_h2h = ?,
+                data_quality = ?, stats_coverage = ?, sample_home = ?, sample_away = ?, sample_h2h = ?,
                 explanation_json = ?, model_version = ?
             WHERE id = ?
           `, [...parameters, existingId]);
@@ -442,14 +542,14 @@ export async function runAnalysis(days = 15) {
         return db.run(`
           INSERT INTO predictions(
             fixture_id, market, selection, raw_probability, probability, expected_total,
-            data_quality, sample_home, sample_away, sample_h2h, explanation_json, model_version, is_active
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            data_quality, stats_coverage, sample_home, sample_away, sample_h2h, explanation_json, model_version, is_active
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         `, [fixture.id, prediction.market, ...parameters]);
       }));
       analyzed += 1;
     }
 
-    const dates = [...new Set(fixtures.map((fixture) => fixture.kickoff_utc.slice(0, 10)))];
+    const dates = [...new Set(fixtures.map((fixture) => istanbulDateKey(fixture.kickoff_utc)))];
     let coupons = 0;
     for (const date of dates) coupons += await buildCoupons(db, date);
     return { analyzed, settled, couponsSettled, coupons, fixturesInWindow: fixtures.length, modelVersion: MODEL_VERSION };
@@ -490,9 +590,12 @@ export async function getDashboard(days = 15) {
   }));
 
   const couponRows = await db.all(`
-    SELECT c.id, c.generated_for, c.label, c.combined_probability, c.risk, c.status, c.created_at,
+    SELECT c.id, c.generated_for, c.label, c.combined_probability, c.risk,
+           COALESCE(mcr.status, c.status) AS status,
+           CASE WHEN mcr.coupon_id IS NULL THEN 0 ELSE 1 END AS manually_reviewed,
+           c.created_at,
            cs.position, p.market, p.selection, p.probability, p.outcome,
-           f.kickoff_utc, ht.name AS home_team, at.name AS away_team,
+           f.id AS fixture_id, f.kickoff_utc, ht.name AS home_team, at.name AS away_team,
            f.status AS fixture_status, f.home_goals, f.away_goals,
            comp.code AS competition_code, comp.name AS competition
     FROM coupons c
@@ -502,6 +605,7 @@ export async function getDashboard(days = 15) {
     JOIN teams ht ON ht.id = f.home_team_id
     JOIN teams at ON at.id = f.away_team_id
     JOIN competitions comp ON comp.code = f.competition_code
+    LEFT JOIN manual_coupon_reviews mcr ON mcr.coupon_id = c.id
     WHERE c.status <> 'SUPERSEDED'
     ORDER BY c.generated_for DESC, c.id DESC, cs.position
   `);
@@ -516,10 +620,12 @@ export async function getDashboard(days = 15) {
       combined_probability: row.combined_probability,
       risk: row.risk,
       status: row.status,
+      manually_reviewed: Boolean(row.manually_reviewed),
       selections: [],
     };
     (existing.selections as Record<string, unknown>[]).push({
       position: row.position,
+      fixture_id: row.fixture_id,
       market: row.market,
       selection: row.selection,
       probability: row.probability,

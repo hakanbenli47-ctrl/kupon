@@ -53,8 +53,11 @@ const teamId = db.prepare("SELECT id FROM teams WHERE name = ?");
 const insert = db.prepare(`
   INSERT INTO fixtures(external_id, competition_code, kickoff_utc, home_team_id, away_team_id, status, home_goals, away_goals, source_name, source_url, source_checked_at)
   VALUES (?, ?, ?, ?, ?, 'FINISHED', ?, ?, 'football-data.co.uk', ?, ?)
-  ON CONFLICT(external_id) DO UPDATE SET home_goals = excluded.home_goals, away_goals = excluded.away_goals,
-    status = 'FINISHED', source_checked_at = excluded.source_checked_at, updated_at = CURRENT_TIMESTAMP
+  ON CONFLICT(external_id) DO UPDATE SET
+    home_goals = CASE WHEN EXISTS (SELECT 1 FROM manual_fixture_results mr WHERE mr.fixture_id=fixtures.id) THEN fixtures.home_goals ELSE excluded.home_goals END,
+    away_goals = CASE WHEN EXISTS (SELECT 1 FROM manual_fixture_results mr WHERE mr.fixture_id=fixtures.id) THEN fixtures.away_goals ELSE excluded.away_goals END,
+    status = CASE WHEN EXISTS (SELECT 1 FROM manual_fixture_results mr WHERE mr.fixture_id=fixtures.id) THEN fixtures.status ELSE 'FINISHED' END,
+    source_checked_at = excluded.source_checked_at, updated_at = CURRENT_TIMESTAMP
 `);
 const fixtureIdByKey = db.prepare("SELECT id FROM fixtures WHERE external_id = ?");
 const upsertStats = db.prepare(`

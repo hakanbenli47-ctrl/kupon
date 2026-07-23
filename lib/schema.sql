@@ -54,6 +54,22 @@ CREATE TABLE IF NOT EXISTS match_stats (
   away_yellow_cards INTEGER,
   home_red_cards INTEGER,
   away_red_cards INTEGER,
+  home_attacks INTEGER,
+  away_attacks INTEGER,
+  home_pass_accuracy REAL,
+  away_pass_accuracy REAL,
+  home_passes_completed INTEGER,
+  away_passes_completed INTEGER,
+  home_passes_attempted INTEGER,
+  away_passes_attempted INTEGER,
+  home_balls_recovered INTEGER,
+  away_balls_recovered INTEGER,
+  home_saves INTEGER,
+  away_saves INTEGER,
+  home_big_chances INTEGER,
+  away_big_chances INTEGER,
+  home_xg REAL,
+  away_xg REAL,
   source_url TEXT NOT NULL,
   checked_at TEXT NOT NULL,
   CHECK (home_possession IS NULL OR home_possession BETWEEN 0 AND 100),
@@ -86,6 +102,7 @@ CREATE TABLE IF NOT EXISTS predictions (
   probability REAL NOT NULL,
   expected_total REAL NOT NULL,
   data_quality REAL NOT NULL,
+  stats_coverage REAL NOT NULL DEFAULT 0,
   sample_home INTEGER NOT NULL,
   sample_away INTEGER NOT NULL,
   sample_h2h INTEGER NOT NULL,
@@ -121,6 +138,24 @@ CREATE TABLE IF NOT EXISTS coupon_selections (
   prediction_id INTEGER NOT NULL REFERENCES predictions(id),
   position INTEGER NOT NULL,
   PRIMARY KEY(coupon_id, prediction_id)
+);
+
+CREATE TABLE IF NOT EXISTS manual_fixture_results (
+  fixture_id INTEGER PRIMARY KEY REFERENCES fixtures(id) ON DELETE CASCADE,
+  home_goals INTEGER NOT NULL,
+  away_goals INTEGER NOT NULL,
+  entered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CHECK (home_goals BETWEEN 0 AND 30),
+  CHECK (away_goals BETWEEN 0 AND 30)
+);
+
+CREATE TABLE IF NOT EXISTS manual_coupon_reviews (
+  coupon_id INTEGER PRIMARY KEY REFERENCES coupons(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  entered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CHECK (status IN ('WON','LOST'))
 );
 
 CREATE TABLE IF NOT EXISTS sync_runs (
