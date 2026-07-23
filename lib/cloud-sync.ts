@@ -382,6 +382,17 @@ export async function runDailyCloudSync() {
   const errors: string[] = [];
   try {
     const fixtures = await db.all(`
+      WITH upcoming_teams AS (
+        SELECT home_team_id AS team_id FROM fixtures
+        WHERE status IN ('SCHEDULED','TIMED','TBC')
+          AND datetime(kickoff_utc) >= datetime('now')
+          AND datetime(kickoff_utc) <= datetime('now', '+31 days')
+        UNION
+        SELECT away_team_id AS team_id FROM fixtures
+        WHERE status IN ('SCHEDULED','TIMED','TBC')
+          AND datetime(kickoff_utc) >= datetime('now')
+          AND datetime(kickoff_utc) <= datetime('now', '+31 days')
+      )
       SELECT f.id, f.external_id, f.competition_code, f.kickoff_utc, f.status,
              f.home_goals, f.away_goals, f.home_team_id, f.away_team_id,
              ht.name AS home_team, at.name AS away_team, f.source_url,
@@ -401,8 +412,11 @@ export async function runDailyCloudSync() {
       )
       ORDER BY CASE
                  WHEN f.status <> 'FINISHED' AND datetime(f.kickoff_utc) <= datetime('now') THEN 0
-                 WHEN f.status = 'FINISHED' AND ges.fixture_id IS NULL THEN 1
-                 ELSE 2
+                 WHEN f.status = 'FINISHED' AND ges.fixture_id IS NULL
+                   AND (f.home_team_id IN (SELECT team_id FROM upcoming_teams)
+                     OR f.away_team_id IN (SELECT team_id FROM upcoming_teams)) THEN 1
+                 WHEN f.status = 'FINISHED' AND ges.fixture_id IS NULL THEN 2
+                 ELSE 3
                END,
                f.kickoff_utc DESC
       LIMIT 9
