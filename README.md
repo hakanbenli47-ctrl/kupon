@@ -9,6 +9,7 @@ Turso üzerinde kalıcı veri havuzu kullanan, 31 günlük fikstürü analiz ede
 - Yerel yedek: `data/kupon.db` ve `data/backups/`
 - Şema ve otomatik geçişler: `lib/schema.sql`, `lib/db.ts`
 - UEFA fikstür/sonuç güncellemesi: `node scripts/update-uefa.mjs`
+- UEFA takım kimliğiyle son maç, gol olayı ve resmî maç istatistiği tamamlama: günlük bulut otomasyonu
 - Resmî 2026/27 Premier Lig, La Liga ve Süper Lig fikstürü: `scripts/import-official-schedules.py`
 - Ulusal lig geçmişi: `node scripts/import-domestic-history.mjs`
 - Doğrulanmış JSON içe aktarma: `node scripts/ingest-fixtures.mjs data/imports/guncel.json`
@@ -37,10 +38,12 @@ Her tahminde ayrıntılı istatistik ve gol dakikası kapsamı ayrıca saklanır
 Vercel Cron her gün `02:00 UTC` (Türkiye saatiyle yaklaşık `05:00`) `/api/cron/daily` yolunu çağırır. Bilgisayarın açık olması gerekmez. Günlük işlem:
 
 1. Yakın zamanda oynanan maçları UEFA Match Centre ve ücretsiz TheSportsDB verileriyle kontrol eder.
-2. Manuel girilmiş skorları korur.
-3. Doğrulanmış skor, maç istatistiği ve eksiksiz gol olaylarını Turso'ya kaydeder.
-4. Sonuçlanan tahmin ve kuponları kapatır.
-5. 31 günlük analizleri ve günün kuponlarını yeniden üretir.
+2. Yaklaşan UEFA maçlarındaki iki takımın ayrı ayrı son beş bitmiş maçını takım kimliğiyle tamamlar.
+3. Resmî UEFA maç istatistiğinden şut, isabetli şut, korner, faul ve kart verilerini alır.
+4. Gol dakikalarını resmî normal süre skoruyla doğrular; uzatma devresi gollerini 90 dakika pazarına katmaz.
+5. Manuel girilmiş skorları korur.
+6. Sonuçlanan tahmin ve kuponları kapatır.
+7. 31 günlük analizleri ve günün kuponlarını yeniden üretir.
 
 `CRON_SECRET` tanımlanırsa cron yolu Bearer anahtarıyla korunur. Aynı gün içindeki yinelenen çağrılar `cloud_sync_locks` tablosuyla tekilleştirilir.
 
