@@ -68,6 +68,12 @@ type UefaMatch = {
   };
 };
 
+const UEFA_FIXTURE_PAGES = [
+  "https://www.uefa.com/uefachampionsleague/news/02a6-20e5a8be4e63-ae971c582f8c-1000--champions-league-qualifying-fixtures-dates-how-it-works/",
+  "https://www.uefa.com/uefaeuropaleague/news/02a6-20e5db0029dd-8241a8d00925-1000--europa-league-qualifying-fixtures-dates-how-it-works/",
+  "https://www.uefa.com/uefaconferenceleague/news/02a6-20e5e911587f-cc10425958b3-1000--conference-league-qualifying-fixtures-dates-how-it-works/",
+] as const;
+
 const STAT_COLUMNS = [
   "home_shots", "away_shots", "home_shots_on_target", "away_shots_on_target",
   "home_corners", "away_corners", "home_possession", "away_possession",
@@ -122,6 +128,16 @@ async function fetchJson(url: string, timeoutMs = 8_000) {
   });
   if (!response.ok) throw new Error(`${new URL(url).hostname}: HTTP ${response.status}`);
   return response.json() as Promise<unknown>;
+}
+
+async function fetchText(url: string, timeoutMs = 10_000) {
+  const response = await fetch(url, {
+    headers: { "User-Agent": "KuponAnaliz/2.1 (+https://kupon-eight.vercel.app)" },
+    cache: "no-store",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`${new URL(url).hostname}: HTTP ${response.status}`);
+  return response.text();
 }
 
 function uefaCompetitionCode(value: unknown) {
@@ -450,6 +466,163 @@ async function providerTeamId(
       team_id=excluded.team_id, source_url=excluded.source_url, checked_at=excluded.checked_at
   `, [provider, externalId, teamId, sourceUrl, new Date().toISOString()]);
   return teamId;
+}
+
+function discoveredUefaStatus(value: unknown) {
+  const statuses: Record<string, SyncFixture["status"]> = {
+    FINISHED: "FINISHED",
+    UPCOMING: "TIMED",
+    LIVE: "TIMED",
+    CURRENT: "TIMED",
+    ABANDONED: "POSTPONED",
+    CANCELED: "CANCELLED",
+  };
+  return statuses[String(value || "")] || "TBC";
+}
+
+async function importDiscoveredUefaFixture(db: SqliteDb, match: UefaMatch, discoveryUrl: string) {
+  const matchId = String(match.id || "");
+  const competitionCode = uefaCompetitionCode(match.competition?.code);
+  const kickoff = new Date(String(match.kickOffTime?.dateTime || ""));
+  if (!matchId || !competitionCode || Number.isNaN(kickoff.getTime())
+    || !match.homeTeam || !match.awayTeam) return null;
+  if (match.status === "FINISHED") {
+    return importUefaHistoryMatch(db, match);
+  }
+
+  const sourceUrl = uefaSourceUrl(competitionCode, matchId);
+  const [homeTeamId, awayTeamId] = await Promise.all([
+    providerTeamId(db, "UEFA", match.homeTeam, sourceUrl),
+    providerTeamId(db, "UEFA", match.awayTeam, sourceUrl),
+  ]);
+  const existing = await db.get(`
+    SELECT id FROM fixtures WHERE external_id IN (?, ?) LIMIT 1
+  `, [`uefa-${competitionCode}-${matchId}`, `uefa-history-${competitionCode}-${matchId}`]) as { id?: number } | undefined;
+  const checkedAt = new Date().toISOString();
+  const status = discoveredUefaStatus(match.status);
+  if (existing?.id) {
+    await db.run(`
+      UPDATE fixtures SET competition_code=?, kickoff_utc=?, home_team_id=?, away_team_id=?,
+        status=CASE WHEN EXISTS (
+          SELECT 1 FROM manual_fixture_results mr WHERE mr.fixture_id=fixtures.id
+        ) THEN fixtures.status ELSE ? END,
+        stage='UEFA 2026/27', source_name='UEFA Fixture Discovery',
+        source_url=?, source_checked_at=?, updated_at=CURRENT_TIMESTAMP
+      WHERE id=?
+    `, [competitionCode, kickoff.toISOString(), homeTeamId, awayTeamId, status, sourceUrl, checkedAt, existing.id]);
+    return { fixtureId: Number(existing.id), completeGoalSet: false };
+  }
+  const inserted = await db.run(`
+    INSERT INTO fixtures(
+      external_id, competition_code, kickoff_utc, home_team_id, away_team_id, status,
+      stage, source_name, source_url, source_checked_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'UEFA 2026/27', 'UEFA Fixture Discovery', ?, ?)
+  `, [
+    `uefa-${competitionCode}-${matchId}`, competitionCode, kickoff.toISOString(),
+    homeTeamId, awayTeamId, status, sourceUrl || discoveryUrl, checkedAt,
+  ]);
+  return { fixtureId: Number(inserted.lastInsertRowid), completeGoalSet: false };
+}
+
+export async function runUefaFixtureDiscovery(batchSize = 24, analyzeWhenDone = false) {
+  const db = await getDb();
+  await ensureSeedData(db);
+  const pageResults = await Promise.allSettled(UEFA_FIXTURE_PAGES.map(async (url) => ({
+    url,
+    html: await fetchText(url),
+  })));
+  const pageErrors = pageResults
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
+  const matchSources = new Map<string, string>();
+  for (const result of pageResults) {
+    if (result.status !== "fulfilled") continue;
+    const regex = /\/match\/(\d+)/g;
+    let found;
+    while ((found = regex.exec(result.value.html))) matchSources.set(found[1], result.value.url);
+  }
+  const checks = await db.all("SELECT match_id, status, attempts FROM uefa_fixture_discovery") as Array<{
+    match_id: string;
+    status: string;
+    attempts: number;
+  }>;
+  const checked = new Map(checks.map((row) => [String(row.match_id), row]));
+  const candidates = [...matchSources.keys()]
+    .filter((matchId) => {
+      const previous = checked.get(matchId);
+      return !previous || (previous.status === "FAILED" && Number(previous.attempts) < 3);
+    })
+    .sort((left, right) => Number(right) - Number(left));
+  const selected = candidates.slice(0, Math.max(1, Math.min(batchSize, 60)));
+  const fetched: Array<{ matchId: string; match: UefaMatch | null; error?: string }> = [];
+  for (let index = 0; index < selected.length; index += 6) {
+    const group = selected.slice(index, index + 6);
+    const groupResults = await Promise.all(group.map(async (matchId) => {
+      try {
+        const raw = await fetchJson(`https://match.uefa.com/v5/matches?matchId=${matchId}`);
+        return { matchId, match: Array.isArray(raw) ? raw[0] as UefaMatch : null };
+      } catch (error) {
+        return { matchId, match: null, error: error instanceof Error ? error.message : String(error) };
+      }
+    }));
+    fetched.push(...groupResults);
+  }
+  const now = Date.now();
+  const minTime = now - 60 * 86_400_000;
+  const maxTime = now + 45 * 86_400_000;
+  let imported = 0;
+  let skipped = 0;
+  let completeGoalSets = 0;
+  const errors = [...pageErrors];
+  for (const item of fetched) {
+    const sourceUrl = matchSources.get(item.matchId) || UEFA_FIXTURE_PAGES[0];
+    let status = "FAILED";
+    let note: string | null = item.error || "UEFA maç yanıtı boş";
+    try {
+      const kickoff = new Date(String(item.match?.kickOffTime?.dateTime || "")).getTime();
+      const competitionCode = uefaCompetitionCode(item.match?.competition?.code);
+      if (!item.match || !competitionCode || !Number.isFinite(kickoff) || kickoff < minTime || kickoff > maxTime) {
+        status = "SKIPPED";
+        note = "Desteklenen 60 gün geçmiş / 45 gün gelecek penceresinin dışında";
+        skipped += 1;
+      } else {
+        const result = await importDiscoveredUefaFixture(db, item.match, sourceUrl);
+        if (!result) throw new Error("UEFA fikstürü doğrulanamadı");
+        status = "IMPORTED";
+        note = null;
+        imported += 1;
+        if (result.completeGoalSet) completeGoalSets += 1;
+      }
+    } catch (error) {
+      note = error instanceof Error ? error.message : String(error);
+      errors.push(`${item.matchId}: ${note || "Bilinmeyen hata"}`.slice(0, 220));
+    }
+    await db.run(`
+      INSERT INTO uefa_fixture_discovery(match_id, competition_code, status, attempts, source_url, checked_at, notes)
+      VALUES (?, ?, ?, 1, ?, ?, ?)
+      ON CONFLICT(match_id) DO UPDATE SET competition_code=excluded.competition_code,
+        status=excluded.status, attempts=uefa_fixture_discovery.attempts + 1,
+        source_url=excluded.source_url, checked_at=excluded.checked_at, notes=excluded.notes
+    `, [
+      item.matchId, uefaCompetitionCode(item.match?.competition?.code), status,
+      sourceUrl, new Date().toISOString(), note || null,
+    ]);
+  }
+  const remaining = Math.max(0, candidates.length - selected.length)
+    + fetched.filter((item) => item.error).length;
+  const analysis = analyzeWhenDone ? await runAnalysis(31) : null;
+  return {
+    ok: true,
+    pagesChecked: pageResults.filter((result) => result.status === "fulfilled").length,
+    linksFound: matchSources.size,
+    checked: selected.length,
+    imported,
+    skipped,
+    completeGoalSets,
+    remaining,
+    errors: errors.slice(0, 8),
+    analysis,
+  };
 }
 
 function embeddedUefaGoals(
@@ -870,6 +1043,10 @@ export async function runDailyCloudSync() {
   let completeGoalSets = 0;
   const errors: string[] = [];
   try {
+    const fixtureDiscovery = await runUefaFixtureDiscovery(18, false).catch((error) => ({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    }));
     const fixtures = await db.all(`
       WITH upcoming_teams AS (
         SELECT home_team_id AS team_id FROM fixtures
@@ -956,6 +1133,7 @@ export async function runDailyCloudSync() {
       updated,
       completeGoalSets,
       errors: errors.slice(0, 6),
+      fixtureDiscovery,
       historyBackfill,
       statsBackfill,
       analysis,
@@ -973,6 +1151,7 @@ export async function runDailyCloudSync() {
       checked,
       updated,
       completeGoalSets,
+      fixtureDiscovery,
       historyBackfill,
       statsBackfill,
       errors: errors.slice(0, 6),

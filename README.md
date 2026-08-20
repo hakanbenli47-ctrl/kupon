@@ -9,6 +9,7 @@ Turso üzerinde kalıcı veri havuzu kullanan, 31 günlük fikstürü analiz ede
 - Yerel yedek: `data/kupon.db` ve `data/backups/`
 - Şema ve otomatik geçişler: `lib/schema.sql`, `lib/db.ts`
 - UEFA fikstür/sonuç güncellemesi: `node scripts/update-uefa.mjs`
+- Güncel UEFA fikstür keşfi: resmî eleme sayfalarındaki maç kimliklerini günlük bulut işleminde tarar
 - UEFA takım kimliğiyle son maç, gol olayı ve resmî maç istatistiği tamamlama: günlük bulut otomasyonu
 - Resmî 2026/27 Premier Lig, La Liga ve Süper Lig fikstürü: `scripts/import-official-schedules.py`
 - Ulusal lig geçmişi: `node scripts/import-domestic-history.mjs`
@@ -37,13 +38,14 @@ Her tahminde ayrıntılı istatistik ve gol dakikası kapsamı ayrıca saklanır
 
 Vercel Cron her gün `02:00 UTC` (Türkiye saatiyle yaklaşık `05:00`) `/api/cron/daily` yolunu çağırır. Bilgisayarın açık olması gerekmez. Günlük işlem:
 
-1. Yakın zamanda oynanan maçları UEFA Match Centre ve ücretsiz TheSportsDB verileriyle kontrol eder.
-2. Yaklaşan UEFA maçlarındaki iki takımın ayrı ayrı son beş bitmiş maçını takım kimliğiyle tamamlar.
-3. Resmî UEFA maç istatistiğinden şut, isabetli şut, korner, faul ve kart verilerini alır.
-4. Gol dakikalarını resmî normal süre skoruyla doğrular; uzatma devresi gollerini 90 dakika pazarına katmaz.
-5. Manuel girilmiş skorları korur.
-6. Sonuçlanan tahmin ve kuponları kapatır.
-7. 31 günlük analizleri ve günün kuponlarını yeniden üretir.
+1. Resmî UEFA eleme sayfalarındaki yeni maç kimliklerini keşfeder ve 31 günlük pencereye ekler.
+2. Yakın zamanda oynanan maçları UEFA Match Centre ve ücretsiz TheSportsDB verileriyle kontrol eder.
+3. Yaklaşan UEFA maçlarındaki iki takımın ayrı ayrı son beş bitmiş maçını takım kimliğiyle tamamlar.
+4. Resmî UEFA maç istatistiğinden şut, isabetli şut, korner, faul ve kart verilerini alır.
+5. Gol dakikalarını resmî normal süre skoruyla doğrular; uzatma devresi gollerini 90 dakika pazarına katmaz.
+6. Manuel girilmiş skorları korur.
+7. Sonuçlanan tahmin ve kuponları kapatır.
+8. 31 günlük analizleri ve günün kuponlarını yeniden üretir.
 
 `CRON_SECRET` tanımlanırsa cron yolu Bearer anahtarıyla korunur. Aynı gün içindeki yinelenen çağrılar `cloud_sync_locks` tablosuyla tekilleştirilir.
 
@@ -57,7 +59,7 @@ Canlı ortamda `MANUAL_ENTRY_TOKEN` tanımlı değilse manuel kayıt API’si ka
 
 Otomasyon her 15 günde bir saat 21:14’te:
 
-1. Turso yedeğini alır.
+1. Turso'nun şema ve bütün tablo satırlarını içeren mantıksal JSON yedeğini alır.
 2. Kullanıcının manuel kayıtlarına dokunmadan fikstür, sonuç ve takım geçmişini yeniler.
 3. Ücretsiz ve doğrulanabilir kaynaklarda bulunan ayrıntılı performans verilerini ve oyuncu durumlarını günceller.
 4. Takım adlarını tekilleştirir, yinelenen veya tutarsız kayıtları denetler.

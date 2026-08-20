@@ -250,6 +250,17 @@ CREATE TABLE IF NOT EXISTS fixture_stats_checks (
   CHECK (status IN ('SUCCESS','UNAVAILABLE','FAILED'))
 );
 
+CREATE TABLE IF NOT EXISTS uefa_fixture_discovery (
+  match_id TEXT PRIMARY KEY,
+  competition_code TEXT,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 1,
+  source_url TEXT NOT NULL,
+  checked_at TEXT NOT NULL,
+  notes TEXT,
+  CHECK (status IN ('IMPORTED','SKIPPED','FAILED'))
+);
+
 INSERT OR IGNORE INTO competitions(code, name, country) VALUES
   ('CL', 'UEFA Şampiyonlar Ligi', 'Avrupa'),
   ('EL', 'UEFA Avrupa Ligi', 'Avrupa'),
