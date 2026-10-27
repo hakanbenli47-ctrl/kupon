@@ -157,7 +157,7 @@ async function saveFixture(db:SqliteDb,fixture:ImportedMatch) {
     home_team_id,away_team_id,status,home_goals,away_goals,
     source_name,source_url,source_checked_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,?)`,[
-      fixture.external_id,fixture.competition_code,fixture.kickoff_utc,h.id,a.id,
+      fixture.external_id,fixture.competition_code,fixture.kickoff_utc,Number(h.id),Number(a.id),
       verifiedFinal?"FINISHED":fixture.status,
       verifiedFinal?fixture.home_goals:null,verifiedFinal?fixture.away_goals:null,
       fixture.source_name,fixture.source_url,new Date().toISOString()
