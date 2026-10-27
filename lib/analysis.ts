@@ -514,6 +514,15 @@ async function settleCoupons(db: SqliteDb) {
   return updated;
 }
 
+export async function settleFinishedResults() {
+  const db = await getDb();
+  await ensureSeedData(db);
+  return withTransaction(async (transaction) => ({
+    predictions: await settlePredictions(transaction),
+    coupons: await settleCoupons(transaction),
+  }));
+}
+
 async function buildCoupons(db: SqliteDb, generatedFor: string) {
   const rows = await db.all(`
     SELECT p.id, p.fixture_id, p.market, p.selection,
