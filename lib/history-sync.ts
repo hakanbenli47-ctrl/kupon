@@ -112,8 +112,6 @@ async function importBatch(job:Job,index:number,limit:number,db:SqliteDb){
   } else {
     const src=TFF_SOURCES.find(x=>x.code===job.league);
     if(!src)return {more:false,stored:0,goalsSaved:0,scanned:0};
-    const week=index+1;
-    if(week>src.maxWeek)return {more:false,stored:0,goalsSaved:0,scanned:0};
     const base="https://www.tff.org/Default.aspx?pageID="+src.page;
     const indexHtml=await snapshotText(base);
     const groups=new Set<string>();
@@ -125,8 +123,11 @@ async function importBatch(job:Job,index:number,limit:number,db:SqliteDb){
       if(group)groups.add(group);
     }
     const ids=[...groups];
-    const urls=(ids.length?ids.map(id=>base+"&grupID="+id):[base])
-      .map(url=>url+"&hafta="+week);
+    const groupCount=Math.max(1,ids.length);
+    const week=Math.floor(index/groupCount)+1;
+    if(week>src.maxWeek)return {more:false,stored:0,goalsSaved:0,scanned:0};
+    const selectedGroup=ids.length?ids[index % groupCount]:null;
+    const urls=[base+(selectedGroup?"&grupID="+selectedGroup:"")+"&hafta="+week];
     const pages=await Promise.allSettled(urls.map(snapshotText));
     const found=new Map<string,ImportedMatch>();
     for(const [i,result] of pages.entries()){
@@ -137,7 +138,7 @@ async function importBatch(job:Job,index:number,limit:number,db:SqliteDb){
     }
     if(found.size>limit)throw Error("TFF weekly results exceed batch capacity");
     fixtures=[...found.values()].map(f=>({fixture:f,goals:[]}));
-    more=week<src.maxWeek;
+    more=index+1<src.maxWeek*groupCount;
   }
   let stored=0,goalsSaved=0;
   for(const item of fixtures){
@@ -160,8 +161,13 @@ export async function runHistoryBackfill(limit=55){
       &&Date.now()-Date.parse(String(progress.last_checked_at))<20*60_000)return false;
     return true;
   })
-    .sort((a,b)=>Number(lookup.get(key(a))?.cursor_index||0)-Number(lookup.get(key(b))?.cursor_index||0)
-      || a.league.localeCompare(b.league));
+    .sort((a,b)=>{
+      const aFail=lookup.get(key(a))?.last_status==="FAILED"?1:0;
+      const bFail=lookup.get(key(b))?.last_status==="FAILED"?1:0;
+      return aFail-bFail
+        || Number(lookup.get(key(a))?.cursor_index||0)-Number(lookup.get(key(b))?.cursor_index||0)
+        || a.league.localeCompare(b.league);
+    });
   const job=pending[0];
   if(!job)return {ok:true,complete:true,remaining:0};
   const index=Number(lookup.get(key(job))?.cursor_index||0);
