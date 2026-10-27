@@ -117,7 +117,8 @@ async function importBatch(job:Job,index:number,limit:number,db:SqliteDb){
     const url="https://www.tff.org/Default.aspx?pageID="+src.page+"&hafta="+week;
     const raw=await snapshotText(url);
     const found=parseTffRows(raw,job.league,url).filter(f=>f.status==="FINISHED");
-    fixtures=found.slice(0,limit).map(f=>({fixture:f,goals:[]}));
+    if(found.length>limit)throw Error("TFF weekly results exceed batch capacity");
+    fixtures=found.map(f=>({fixture:f,goals:[]}));
     more=week<src.maxWeek;
   }
   let stored=0,goalsSaved=0;
@@ -131,10 +132,16 @@ async function importBatch(job:Job,index:number,limit:number,db:SqliteDb){
 export async function runHistoryBackfill(limit=55){
   const db=await getDb();await ensureSeedData(db);
   const cap=Math.max(15,Math.min(100,Math.floor(limit)));
-  const entries=await db.all("SELECT provider,competition_code,season,cursor_index,last_status FROM history_backfill_cursors");
+  const entries=await db.all("SELECT provider,competition_code,season,cursor_index,last_status,last_checked_at FROM history_backfill_cursors");
   const key=(j:Job)=>j.provider+"/"+j.league+"/"+j.season;
   const lookup=new Map(entries.map(x=>[String(x.provider)+"/"+x.competition_code+"/"+x.season,x]));
-  const pending=jobs.filter(j=>lookup.get(key(j))?.last_status!=="COMPLETE")
+  const pending=jobs.filter(j=>{
+    const progress=lookup.get(key(j));
+    if(progress?.last_status==="COMPLETE")return false;
+    if(progress?.last_status==="FAILED"&&progress.last_checked_at
+      &&Date.now()-Date.parse(String(progress.last_checked_at))<20*60_000)return false;
+    return true;
+  })
     .sort((a,b)=>Number(lookup.get(key(a))?.cursor_index||0)-Number(lookup.get(key(b))?.cursor_index||0)
       || a.league.localeCompare(b.league));
   const job=pending[0];
