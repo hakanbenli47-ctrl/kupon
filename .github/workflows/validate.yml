@@ -20,3 +20,4 @@ jobs:
       - run: nl -ba lib/league-fixtures.ts | sed -n '200,220p'
       - run: npx tsc --noEmit
       - run: npm run test:optimizer
+      - run: npm run test:v4
