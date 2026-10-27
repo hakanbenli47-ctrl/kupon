@@ -235,7 +235,7 @@ export function outcomeProbabilities(profile:ModelProfile){
 }
 export function scoreModel(
   games:HistoricalGame[], holdoutCount=120,
-):{count:number;brier:number;baselineBrier:number;logLoss:number;over25Brier:number;rows:Array<{date:string;fixtureId:number;actual:string;home:number;draw:number;away:number}>}{
+):{count:number;brier:number;baselineBrier:number;logLoss:number;over25Brier:number;winnerAccuracy:number;baselineAccuracy:number;over25Accuracy:number;rows:Array<{date:string;fixtureId:number;actual:string;home:number;draw:number;away:number}>}{
   const ordered=verifiedHistory(games).sort((a,b)=>a.kickoff.localeCompare(b.kickoff));
   const recent=ordered.slice(-Math.min(500,Math.max(20,holdoutCount)));
   let sumBrier=0,sumBase=0,sumLoss=0,sumO25=0,n=0;
