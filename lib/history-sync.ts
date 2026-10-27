@@ -1,6 +1,7 @@
 import "server-only";
 import { getDb, type SqliteDb } from "./db";
 import { ensureSeedData } from "./seed";
+import { canonicalTeam } from "./scoreboard-feed";
 import { LEAGUE_SOURCES, TFF_SOURCES, requestEspn, saveFixture, parseTffRows, type ImportedMatch } from "./league-fixtures";
 
 type Goal = { side:"home"|"away"; minute:number; player:string|null; ownGoal:boolean; penalty:boolean; id:string };
@@ -62,7 +63,18 @@ async function storeGoals(db:SqliteDb,f:ImportedMatch,goals:Goal[]):Promise<bool
   if(goals.length!==total)return false;
   if(goals.filter(g=>g.side==="home").length!==f.home_goals
     ||goals.filter(g=>g.side==="away").length!==f.away_goals)return false;
-  const match=await db.get("SELECT f.id, f.home_goals, f.away_goals, f.home_team_id, f.away_team_id FROM fixtures f WHERE f.external_id=?",[f.external_id]);
+  let match=await db.get("SELECT f.id, f.home_goals, f.away_goals, f.home_team_id, f.away_team_id FROM fixtures f WHERE f.external_id=?",[f.external_id]);
+  if(!match){
+    // The same event may have been imported earlier under its official fixture ID.
+    // Only attach a goal set when exactly one score/team/date match is verified.
+    const plausible=await db.all("SELECT f.id,f.home_goals,f.away_goals,f.home_team_id,f.away_team_id,ht.name AS home_team,at.name AS away_team FROM fixtures f JOIN teams ht ON ht.id=f.home_team_id JOIN teams at ON at.id=f.away_team_id WHERE f.competition_code=? AND f.status='FINISHED' AND ABS(strftime('%s',f.kickoff_utc)-strftime('%s',?))<=43200",
+      [f.competition_code,f.kickoff_utc]);
+    const candidates=plausible.filter(m=>
+      canonicalTeam(m.home_team)===canonicalTeam(f.home_team)
+      &&canonicalTeam(m.away_team)===canonicalTeam(f.away_team)
+      &&Number(m.home_goals)===f.home_goals&&Number(m.away_goals)===f.away_goals);
+    if(candidates.length===1)match=candidates[0];
+  }
   if(!match||Number(match.home_goals)!==f.home_goals||Number(match.away_goals)!==f.away_goals)return false;
   const id=Number(match.id);
   const existing=await db.get("SELECT is_complete FROM goal_event_sets WHERE fixture_id=?",[id]);

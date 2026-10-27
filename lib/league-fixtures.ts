@@ -142,7 +142,7 @@ export async function requestEspn(league:string,day:string){
     kickoff_utc:event.kickoffUtc,home_team:event.homeName,away_team:event.awayName,
     status:(event.final?"FINISHED":"TIMED") as ImportedMatch["status"],
     home_goals:event.final?event.homeScore:null,away_goals:event.final?event.awayScore:null,
-    source_name:"ESPN Scoreboard",source_url:event.sourceUrl,
+    source_name:"ESPN Scoreboard",source_url:"https://www.espn.com/soccer/match/_/gameId/"+event.eventId,
   }));
 }
 
