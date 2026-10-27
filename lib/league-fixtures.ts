@@ -74,7 +74,8 @@ export function parseTffRows(html:string,code:string,sourceUrl:string): Imported
     const scoreLabel=scorePosition>0?anchors[scorePosition]:"";
     if(scorePosition<0 && !text.includes(`${home} - ${away}`) && !text.includes(`${home} – ${away}`))continue;
     const rawScore=scoreLabel.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
-    const hasScore=Boolean(rawScore);
+    // An observed in-play score is not a final 90-minute result.
+    const hasScore=Boolean(rawScore) && Date.now() > Date.parse(kickoff)+3.5*3600_000;
     const status=hasScore?"FINISHED":"TIMED";
     const external_id=`tff-${code}-${kickoff.slice(0,10)}-${canonicalTeam(home)}-${canonicalTeam(away)}`;
     unique.set(external_id,{
