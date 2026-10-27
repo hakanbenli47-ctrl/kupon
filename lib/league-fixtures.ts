@@ -198,20 +198,37 @@ export async function importLeagueFixtures(maxPerLeague = 24) {
     }
   }
   for(const league of TFF_SOURCES){
-    const addresses=[
-      `https://www.tff.org/default.aspx?pageID=${league.page}`,
-      ...rounds(league).map(week=>`https://www.tff.org/Default.aspx?pageID=${league.page}&hafta=${week}`),
-    ];
-    const combined=new Map<string,ImportedMatch>();
+    const baseUrl=`https://www.tff.org/default.aspx?pageID=${league.page}`;
     const failures:string[]=[];
-    const pages=await Promise.allSettled(addresses.map(requestText));
+    let baseHtml="";
+    try{baseHtml=await requestText(baseUrl);}catch(error){
+      failures.push(error instanceof Error?error.message:String(error));
+    }
+    const groupUrls=new Set<string>([baseUrl]);
+    // Read group IDs from current season's own league selector links,
+    // rather than guessing IDs from previous seasons.
+    for(const anchor of baseHtml.matchAll(/<a\\b([^>]+)>([\\s\\S]*?)<\\/a>/gi)){
+      const label=plainHtml(anchor[2]).trim();
+      if(!/^(?:beyaz|kırmızı|0?[1-4](?:\\. grup)?|[1-4]\\. grup)$/i.test(label))continue;
+      const href=anchor[1].match(/href=["']([^"']+)["']/i)?.[1]||"";
+      const groupId=decodeHtml(href).match(/grupID=(\\d+)/i)?.[1];
+      if(groupId)groupUrls.add(`https://www.tff.org/Default.aspx?pageID=${league.page}&grupID=${groupId}`);
+      if(groupUrls.size>=5)break;
+    }
+    const addresses=[...new Set([...groupUrls].flatMap(url=>[
+      url,...rounds(league).map(week=>`${url}&hafta=${week}`),
+    ]))];
+    const combined=new Map<string,ImportedMatch>();
+    for(const item of parseTffRows(baseHtml,league.code,baseUrl))combined.set(item.external_id,item);
+    const pages=await Promise.allSettled(addresses.filter(url=>url!==baseUrl).map(requestText));
+    const otherAddresses=addresses.filter(url=>url!==baseUrl);
     for(let index=0;index<pages.length;index++){
       const result=pages[index];
       if(result.status==="rejected"){
         failures.push(result.reason instanceof Error?result.reason.message:String(result.reason));
         continue;
       }
-      for(const item of parseTffRows(result.value,league.code,addresses[index]))
+      for(const item of parseTffRows(result.value,league.code,otherAddresses[index]))
         combined.set(item.external_id,item);
     }
     sources.push({league:league.name,fetched:combined.size,error:failures.length?failures[0]:undefined});
