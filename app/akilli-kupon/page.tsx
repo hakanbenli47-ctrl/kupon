@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 
 type MarketName="1"|"X"|"2"|"1X"|"X2"|"12"|"O1.5"|"U1.5"|"O2.5"|"U2.5"|"O3.5"|"U3.5"|"BTTS_Y"|"BTTS_N";
@@ -57,6 +57,7 @@ export default function EnginePage(){
  const [test,setTest]=useState<TestData|null>(null);
  const [testing,setTesting]=useState(false);
  const [showDetails,setShowDetails]=useState<Record<number,boolean>>({});
+ const warmedUp=useRef(false);
  const fetchData=useCallback(async()=>{
    setLoading(true);
    try{
@@ -68,6 +69,17 @@ export default function EnginePage(){
    finally{setLoading(false);}
  },[]);
  useEffect(()=>{void fetchData();},[fetchData,reload]);
+ useEffect(()=>{
+   if(!data||warmedUp.current)return;
+   warmedUp.current=true;
+   if(data.fixtures.length===0||data.fixtures.some(g=>g.profile.status==="READY"))return;
+   // One cautious first-load history fetch; the scheduled cron continues from saved cursors.
+   void fetch("/api/history-backfill",{
+     method:"POST",headers:{"Content-Type":"application/json"},body:"{}"
+   }).then(response=>response.ok?response.json():null).then(value=>{
+     if(value&&!value.skipped)setReload(n=>n+1);
+   }).catch(()=>{});
+ },[data]);
  useEffect(()=>{
   const timer=window.setInterval(()=>setReload(x=>x+1),120000);
   return ()=>window.clearInterval(timer);
