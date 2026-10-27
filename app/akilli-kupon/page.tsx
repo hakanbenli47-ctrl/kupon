@@ -20,6 +20,8 @@ type Fixture = {
   competition_code: string;
   home_team: string;
   away_team: string;
+  home_team_id: number;
+  away_team_id: number;
   predictions: Prediction[];
 };
 type Data = {
@@ -80,6 +82,9 @@ export default function SmartCouponsPage() {
   const [kickoffTime,setKickoffTime] = useState("AUTO");
   const [refreshing,setRefreshing] = useState(false);
   const [refreshMessage,setRefreshMessage] = useState("");
+  const [loadingHistory,setLoadingHistory] = useState(false);
+  const [historyCoverage,setHistoryCoverage] = useState<Array<{competition_code:string;played:number;complete_goals:number;detailed_stats:number}>>([]);
+  const [historyProgress,setHistoryProgress] = useState<Array<{competition_code:string;provider:string;last_status:string;matches_processed:number;goal_sets_processed:number;last_error:string|null}>>([]);
   const [odds,setOdds] = useState<Record<number,string>>({});
   const [stake,setStake] = useState("");
   const [showAll,setShowAll] = useState(false);
@@ -93,6 +98,37 @@ export default function SmartCouponsPage() {
       });
     return ()=>abort.abort();
   },[refresh]);
+  useEffect(()=>{
+    const controller=new AbortController();
+    fetch("/api/history-status",{cache:"no-store",signal:controller.signal})
+      .then(async r=>{if(!r.ok)throw Error("Geçmiş veri durumu alınamadı");return r.json();})
+      .then((payload:{coverage?:typeof historyCoverage;progress?:typeof historyProgress})=>{
+        setHistoryCoverage(payload.coverage||[]);
+        setHistoryProgress(payload.progress||[]);
+      }).catch(()=>{});
+    return()=>controller.abort();
+  },[refresh]);
+
+  async function updateHistory(){
+    setLoadingHistory(true);
+    setRefreshMessage("");
+    try{
+      const response=await fetch("/api/history-backfill",{
+        method:"POST",cache:"no-store",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({league:league==="ALL"?undefined:league}),
+      });
+      const payload=await response.json() as {
+        ok?:boolean;error?:string;skipped?:boolean;
+        history?:{ok?:boolean;league?:string;stored?:number;goalsSaved?:number;error?:string};
+        detail?:{statsSaved?:number;goalSetsSaved?:number}
+      };
+      if(!response.ok||!payload.ok)throw Error(payload.error||"Geçmiş veriler yüklenemedi.");
+      setRefreshMessage(payload.skipped
+        ?"Yakın zamanda başlatılan geçmiş veri kontrolü zaten çalıştı."
+        : `Tarihçe: ${payload.history?.league||"—"} · ${payload.history?.stored||0} maç · ${payload.history?.goalsSaved||0} doğrulanmış gol olayı seti · ${payload.detail?.statsSaved||0} ayrıntılı maç istatistiği. ${payload.history?.error||""}`);
+    }catch(e){setRefreshMessage(e instanceof Error?e.message:"Geçmiş veri işlemi başarısız.");}
+    finally{setLoadingHistory(false);setRefresh(x=>x+1);}
+  }
   useEffect(()=>{
     const timer=window.setInterval(()=>setRefresh(value=>value+1),90_000);
     return ()=>window.clearInterval(timer);
@@ -208,6 +244,13 @@ export default function SmartCouponsPage() {
         onClick={refreshResults}>{refreshing?"Skorlar kontrol ediliyor…":"Maç ve skorları güncelle"}</button>
     </header>
 
+    <section className="mb-5 flex flex-wrap items-center gap-3">
+      <button disabled={loadingHistory} onClick={updateHistory}
+        className="rounded-xl border border-[#b7cbbd] bg-[#176b45] px-5 py-3 text-sm font-semibold text-white disabled:opacity-50">
+        {loadingHistory?"Geçmiş maçlar doğrulanıyor…":"Geçmiş maç / gol verilerini yükle"}
+      </button>
+      <span className="text-xs text-[#566a5a]">Geçmiş veriler kademeli ve kaynaklı işlenir. Günlük otomatik yenileme de etkin.</span>
+    </section>
     {refreshMessage && <p role="status" className="mb-4 text-sm text-[#176b45]">{refreshMessage}</p>}
     {error && <p role="alert" className="mb-5 rounded-xl bg-red-50 p-4 text-red-800">{error}</p>}
     {stale && <p role="alert" className="mb-5 border-l-4 border-amber-500 bg-amber-50 p-4 text-sm">
@@ -230,7 +273,7 @@ export default function SmartCouponsPage() {
           {[
             ["ALL","Tüm ligler"],["TSL","Türkiye Süper Lig"],["T1","Türkiye 1. Lig"],
             ["T2","Türkiye 2. Lig"],["T3","Türkiye 3. Lig"],
-            ["BL","Almanya Bundesliga"],["SA","İtalya Serie A"],
+            ["BL","Almanya Bundesliga"],["BL2","Almanya 2. Bundesliga"],["BL3","Almanya 3. Liga"],["SA","İtalya Serie A"],
             ["PL","İngiltere Premier Lig"],["LL","İspanya La Liga"],
             ["CL","Şampiyonlar Ligi"],["EL","Avrupa Ligi"],["ECL","Konferans Ligi"],
           ].map(([id,title])=><option key={id} value={id}>{title}</option>)}
@@ -268,6 +311,17 @@ export default function SmartCouponsPage() {
       </div>)}
     </div>
 
+    {historyCoverage.length>0 && <section className="mb-5 rounded-2xl border border-[#dce2dc] bg-white p-5">
+      <h2 className="text-lg font-bold">Liglerde yüklenen gerçek veri kapsamı</h2>
+      <p className="mt-1 text-xs text-[#566a5a]">Sayılar tamamlanan maçlara aittir; ayrıntılı veri her sağlayıcıda bulunmayabilir.</p>
+      <div className="mt-3 grid gap-2 md:grid-cols-2">
+        {historyCoverage.map(row=><div key={row.competition_code} className="flex justify-between gap-3 border-b border-[#edf0eb] py-2 text-sm">
+          <strong>{row.competition_code}</strong>
+          <span>{row.played} sonuç · {row.complete_goals||0} gol dakika seti · {row.detailed_stats||0} istatistik</span>
+        </div>)}
+      </div>
+      {historyProgress.filter(x=>x.last_status==="FAILED").length>0&&<p className="mt-2 text-xs text-amber-800">Bazı sağlayıcılar hata verdi; veriler tamamlanmamış olabilir.</p>}
+    </section>}
     <section className="mb-6 rounded-2xl border border-[#dce2dc] bg-white p-5">
       <div className="mb-4">
         <h2 className="text-xl font-bold">Maç fikstürü · {effectiveDate}</h2>
@@ -289,12 +343,12 @@ export default function SmartCouponsPage() {
       <div className="divide-y divide-[#e7ece7]">
         {dailyFixtures.slice(0,showAll?200:40).map(f=><div key={f.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
           <div>
-            <strong className="text-sm">{f.home_team} – {f.away_team}</strong>
+            <strong className="text-sm"><Link href={"/takim/"+f.home_team_id} className="underline decoration-[#b4c6b6]">{f.home_team}</Link> – <Link href={"/takim/"+f.away_team_id} className="underline decoration-[#b4c6b6]">{f.away_team}</Link></strong>
             <div className="mt-1 text-xs text-[#566a5a]">{f.competition}</div>
           </div>
           <div className="text-right">
             <div className="text-sm font-semibold">{f.status==="TBC"?"Saat onaylanmadı":formatTime(f.kickoff_utc)}</div>
-            <div className="text-xs text-[#566a5a]">{f.predictions.length?"Analiz mevcut":"Analiz için veri bekleniyor"}</div>
+            <div className="text-xs text-[#566a5a]">{f.predictions.length?"Analiz mevcut":"Geçmiş maç verisi / örneklem kontrol ediliyor"}</div>
           </div>
         </div>)}
       </div>
@@ -319,7 +373,7 @@ export default function SmartCouponsPage() {
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <span className="text-xs text-[#566a5a]">{index+1}. {f.competition} · {formatTime(f.kickoff_utc)}</span>
-                  <h3 className="mt-1 font-bold">{f.home_team} – {f.away_team}</h3>
+                  <h3 className="mt-1 font-bold"><Link href={"/takim/"+f.home_team_id} className="underline">{f.home_team}</Link> – <Link href={"/takim/"+f.away_team_id} className="underline">{f.away_team}</Link></h3>
                   <div className="mt-1 text-sm text-[#176b45]">{selectionLabel(p)} · Veri kalitesi {pct(p.data_quality)}</div>
                 </div>
                 <div className="text-right"><strong className="text-xl">{pct(p.conservative_probability)}</strong>

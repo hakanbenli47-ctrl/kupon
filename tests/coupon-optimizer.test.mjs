@@ -12,9 +12,12 @@ test("thin evidence is downgraded rather than overstated",()=>{
   assert.ok(conservativeProbability(0.90,0.8,0.9) < 0.90);
 });
 
-test("no analysis = no coupon; high score without performance stats is rejected",()=>{
+test("no analysis = no coupon; verified score-only model remains available but capped",()=>{
   assert.equal(optimizeCouponPlans([]).length,0);
-  assert.equal(rankSelections([pick(1,10,0.99,0)]).length,0);
+  const scoreOnly=rankSelections([pick(1,10,0.99,0)]);
+  assert.equal(scoreOnly.length,1);
+  assert.ok(scoreOnly[0].conservative_probability<=0.67);
+  assert.ok(scoreOnly[0].conservative_probability<rankSelections([pick(2,11,0.99,0.9)])[0].conservative_probability);
   assert.equal(optimizeCouponPlans([pick(1,1,0.9)]).length,0);
 });
 

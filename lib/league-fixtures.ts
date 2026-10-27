@@ -9,6 +9,8 @@ export const LEAGUE_SOURCES = [
   { code:"LL", name:"La Liga", country:"İspanya", feed:"esp.1" },
   { code:"TSL", name:"Süper Lig", country:"Türkiye", feed:"tur.1" },
   { code:"BL", name:"Bundesliga", country:"Almanya", feed:"ger.1" },
+  { code:"BL2", name:"2. Bundesliga", country:"Almanya", feed:"ger.2" },
+  { code:"BL3", name:"3. Liga", country:"Almanya", feed:"ger.3" },
   { code:"SA", name:"Serie A", country:"İtalya", feed:"ita.1" },
 ] as const;
 
@@ -18,7 +20,7 @@ export const TFF_SOURCES = [
   {code:"T3",name:"Nesine 3. Lig",country:"Türkiye",page:971,yearStart:"2026-09-06",maxWeek:34},
 ] as const;
 
-type ImportedMatch = {
+export type ImportedMatch = {
   external_id:string;
   competition_code:string;
   kickoff_utc:string;
@@ -73,11 +75,19 @@ export function parseTffRows(html:string,code:string,sourceUrl:string): Imported
         const kickoff=trDateUtc(dateParts[1],dateParts[2],dateParts[3],timeParts[1],timeParts[2]);
         const home=plainHtml(officialHome),away=plainHtml(officialAway);
         if(kickoff && home && away && canonicalTeam(home)!==canonicalTeam(away)){
+          const afterHome=row.indexOf(officialHome)+officialHome.length;
+          const beforeAway=row.lastIndexOf(officialAway);
+          const between=beforeAway>afterHome?plainHtml(row.slice(afterHome,beforeAway)):"";
+          const visibleScore=between.match(/(?:^|\s)(\d{1,2})\s*[-:]\s*(\d{1,2})(?:$|\s)/);
+          const verifiedScore=Boolean(visibleScore && Date.now()>Date.parse(kickoff)+4*3600_000);
           const external_id=`tff-${code}-${officialId}`;
           unique.set(external_id,{
             external_id,competition_code:code,kickoff_utc:kickoff,
-            home_team:home,away_team:away,status:"TIMED",
-            home_goals:null,away_goals:null,source_name:"TFF Resmî Fikstür",
+            home_team:home,away_team:away,
+            status:verifiedScore?"FINISHED":"TIMED",
+            home_goals:verifiedScore?Number(visibleScore![1]):null,
+            away_goals:verifiedScore?Number(visibleScore![2]):null,
+            source_name:"TFF Resmî Fikstür",
             source_url:`https://www.tff.org/Default.aspx?pageID=29&macId=${officialId}`,
           });
           continue;
@@ -122,7 +132,7 @@ async function requestText(url:string){
   const bytes=await response.arrayBuffer();
   return new TextDecoder("windows-1254").decode(bytes);
 }
-async function requestEspn(league:string,day:string){
+export async function requestEspn(league:string,day:string){
   const url=`https://site.api.espn.com/apis/site/v2/sports/soccer/${league}/scoreboard?dates=${day}&limit=250`;
   const response=await fetch(url,{headers:{Accept:"application/json"},cache:"no-store",signal:AbortSignal.timeout(8_000)});
   if(!response.ok)throw Error(`ESPN HTTP ${response.status}`);
@@ -136,7 +146,7 @@ async function requestEspn(league:string,day:string){
   }));
 }
 
-async function saveFixture(db:SqliteDb,fixture:ImportedMatch) {
+export async function saveFixture(db:SqliteDb,fixture:ImportedMatch) {
   const kickoff=Date.parse(fixture.kickoff_utc);
   if(!Number.isFinite(kickoff)||!canonicalTeam(fixture.home_team)||!canonicalTeam(fixture.away_team)
     ||canonicalTeam(fixture.home_team)===canonicalTeam(fixture.away_team))return "ignored";

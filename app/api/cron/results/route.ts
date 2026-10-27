@@ -1,4 +1,7 @@
 import { runRecentResultSync } from "@/lib/cloud-sync";
+import { runHistoryBackfill } from "@/lib/history-sync";
+import { enrichEspnMatches } from "@/lib/espn-enrichment";
+import { runAnalysis } from "@/lib/analysis";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,7 +17,11 @@ function authorized(request: Request) {
 export async function GET(request: Request) {
   if (!authorized(request)) return Response.json({error:"Yetkisiz cron isteği."},{status:401});
   try {
-    return Response.json(await runRecentResultSync({maxFixtures:40}),{
+    const results=await runRecentResultSync({maxFixtures:16});
+    const history=await runHistoryBackfill(25);
+    const detail=await enrichEspnMatches(2);
+    const analysis=await runAnalysis(2);
+    return Response.json({ok:true,results,history,detail,analysis},{
       headers:{"Cache-Control":"no-store"}
     });
   } catch (error) {

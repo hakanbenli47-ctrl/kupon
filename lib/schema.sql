@@ -269,7 +269,22 @@ INSERT OR IGNORE INTO competitions(code, name, country) VALUES
   ('TSL', 'Süper Lig', 'Türkiye'),
   ('LL', 'La Liga', 'İspanya'),
   ('BL', 'Bundesliga', 'Almanya'),
+  ('BL2', '2. Bundesliga', 'Almanya'),
+  ('BL3', '3. Liga', 'Almanya'),
   ('SA', 'Serie A', 'İtalya'),
   ('T1', 'Trendyol 1. Lig', 'Türkiye'),
   ('T2', 'Nesine 2. Lig', 'Türkiye'),
   ('T3', 'Nesine 3. Lig', 'Türkiye');
+
+CREATE TABLE IF NOT EXISTS history_backfill_cursors (
+  provider TEXT NOT NULL,
+  competition_code TEXT NOT NULL,
+  season TEXT NOT NULL,
+  cursor_index INTEGER NOT NULL DEFAULT 0,
+  last_checked_at TEXT,
+  last_status TEXT,
+  matches_processed INTEGER NOT NULL DEFAULT 0,
+  goal_sets_processed INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  PRIMARY KEY(provider, competition_code, season)
+);

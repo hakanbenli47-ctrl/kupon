@@ -656,7 +656,7 @@ export async function getDashboard(days = 15) {
   const db = await getDb();
   await ensureSeedData(db);
   const fixtures = await db.all(`
-    SELECT f.id, f.external_id, f.kickoff_utc, f.status, f.home_goals, f.away_goals,
+    SELECT f.id, f.external_id, f.kickoff_utc, f.status, f.home_goals, f.away_goals, f.home_team_id, f.away_team_id,
            c.code AS competition_code, c.name AS competition,
            ht.name AS home_team, at.name AS away_team,
            f.source_name, f.source_url, f.source_checked_at
