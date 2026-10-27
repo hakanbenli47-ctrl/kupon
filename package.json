@@ -11,7 +11,8 @@
     "data:history": "node scripts/import-uefa-history.mjs",
     "data:domestic": "node scripts/import-domestic-history.mjs",
     "data:coverage": "node scripts/report-uefa-coverage.mjs",
-    "db:backup": "node scripts/backup-db.mjs"
+    "db:backup": "node scripts/backup-db.mjs",
+    "test:optimizer": "node --experimental-strip-types --test tests/coupon-optimizer.test.mjs"
   },
   "dependencies": {
     "@libsql/client": "^0.17.4",
