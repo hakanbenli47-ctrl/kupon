@@ -221,9 +221,14 @@ export async function importLeagueFixtures(maxPerLeague = 24) {
     try {
       const start=new Date(maxPast).toISOString().slice(0,10).replace(/-/g,"");
       const end=new Date(maxFuture).toISOString().slice(0,10).replace(/-/g,"");
-      matches=(await requestEspn(league.feed,`${start}-${end}`))
-        .map(f=>({...f,competition_code:league.code}));
-      // Some ESPN competitions do not respond to a large date-range query.
+      let rangedError="";
+      try {
+        matches=(await requestEspn(league.feed,`${start}-${end}`))
+          .map(f=>({...f,competition_code:league.code}));
+      } catch(error) {
+        rangedError=error instanceof Error?error.message:String(error);
+      }
+      // Some ESPN competitions reject large date-range requests outright.
       // A small direct-date fallback prevents showing an empty site on those days.
       if(matches.length===0){
         const dates=[0,1,2,3,4,5,6,7,8,9,10,11,12,13].map(n=>
@@ -233,8 +238,14 @@ export async function importLeagueFixtures(maxPerLeague = 24) {
         matches=[...new Map(snapshots.flatMap(s=>
           s.status==="fulfilled"?s.value.map(f=>[f.external_id,{...f,competition_code:league.code}] as const):[]
         )).values()];
+        if(matches.length===0 && rangedError){
+          sources.push({league:league.name,fetched:0,error:rangedError});
+        }else {
+          sources.push({league:league.name,fetched:matches.length});
+        }
+      }else {
+        sources.push({league:league.name,fetched:matches.length});
       }
-      sources.push({league:league.name,fetched:matches.length});
     }catch(error){
       sources.push({league:league.name,fetched:0,error:error instanceof Error?error.message:String(error)});
     }
