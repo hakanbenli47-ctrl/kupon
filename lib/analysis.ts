@@ -3,8 +3,9 @@ import "server-only";
 import { getDb, SqliteDb, withTransaction } from "./db";
 import { ensureSeedData } from "./seed";
 import { optimizeCouponPlans, type CouponCandidate } from "./coupon-optimizer";
+import { forecast, type HistoricalGame } from "./model-v4";
 
-const MODEL_VERSION = "goal-poisson-2.2-conservative";
+const MODEL_VERSION = "engine-v4.0";
 const MARKETS = [1.5, 2.5, 3.5] as const;
 
 type MatchRow = {
@@ -599,14 +600,55 @@ export async function runAnalysis(days = 15) {
       ORDER BY f.kickoff_utc
     `, [`+${Math.max(1, Math.min(days, 31))} days`]) as unknown as FixtureRow[];
 
+    const sourceRows=await db.all([
+      "SELECT f.id,f.competition_code,f.kickoff_utc,f.home_team_id,f.away_team_id,",
+      "f.home_goals,f.away_goals,ms.home_xg,ms.away_xg",
+      "FROM fixtures f LEFT JOIN match_stats ms ON ms.fixture_id=f.id",
+      "WHERE f.status='FINISHED' AND f.home_goals IS NOT NULL AND f.away_goals IS NOT NULL",
+      "AND datetime(f.kickoff_utc)<datetime('now')",
+      "AND datetime(f.kickoff_utc)>=datetime('now','-370 days') LIMIT 6500"
+    ].join(" "));
+    const historical:HistoricalGame[]=sourceRows.map(row=>({
+      id:Number(row.id),competition:String(row.competition_code),
+      kickoff:String(row.kickoff_utc),homeId:Number(row.home_team_id),awayId:Number(row.away_team_id),
+      homeGoals:Number(row.home_goals),awayGoals:Number(row.away_goals),
+      homeXg:row.home_xg==null?null:Number(row.home_xg),
+      awayXg:row.away_xg==null?null:Number(row.away_xg),
+    }));
     let analyzed = 0;
     for (const fixture of fixtures) {
-      const predictions = await analyzeFixture(db, fixture);
+      const result=forecast({
+        id:fixture.id,competition:fixture.competition_code,kickoff:fixture.kickoff_utc,
+        homeId:fixture.home_team_id,awayId:fixture.away_team_id,
+        homeName:fixture.home_team,awayName:fixture.away_team,
+        source:"",sourceCheckedAt:"",
+      },historical);
+      const predictions=result.status!=="READY"?[]:MARKETS.map(market=>{
+        const over=result.markets!.find(x=>x.name==="O"+market);
+        const under=result.markets!.find(x=>x.name==="U"+market);
+        const selected=(over?.probability??0)>(under?.probability??0)?over!:under!;
+        return {
+          market,selection:selected.name.startsWith("O")?"UST":"ALT",
+          rawProbability:selected.probability,probability:selected.probability,
+          expectedTotal:(result.lambdaHome??0)+(result.lambdaAway??0),
+          dataQuality:result.quality??0,
+          statsCoverage:result.sources?.xg?0.5:0,
+          sampleHome:result.samples?.home??0,sampleAway:result.samples?.away??0,sampleH2h:0,
+          explanation:{expected_home:result.lambdaHome,expected_away:result.lambdaAway,
+            scores:result.scores,samples:result.samples,
+            source_quality:"Verified score model; no missing statistics inferred"},
+        };
+      });
       const existingRows = await db.all(`
-        SELECT id, market FROM predictions
+        SELECT id, market, model_version FROM predictions
         WHERE fixture_id = ? AND is_active = 1 AND outcome IS NULL
-      `, [fixture.id]) as unknown as Array<{ id: number; market: number }>;
-      const existingByMarket = new Map(existingRows.map((row) => [Number(row.market), Number(row.id)]));
+      `, [fixture.id]) as unknown as Array<{ id: number; market: number; model_version:string }>;
+      if(existingRows.some(row=>row.model_version!==MODEL_VERSION)){
+        await db.run("UPDATE predictions SET is_active=0 WHERE fixture_id=? AND model_version<>? AND outcome IS NULL",
+          [fixture.id,MODEL_VERSION]);
+      }
+      const existingByMarket = new Map(existingRows.filter(row=>row.model_version===MODEL_VERSION)
+        .map((row) => [Number(row.market), Number(row.id)]));
       if (!predictions.length) {
         await db.run("UPDATE predictions SET is_active = 0 WHERE fixture_id = ? AND is_active = 1", [fixture.id]);
         continue;
