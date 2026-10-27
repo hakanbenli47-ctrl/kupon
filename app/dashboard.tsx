@@ -87,6 +87,11 @@ const leagues = [
   ["PL", "Premier Lig"],
   ["TSL", "Süper Lig"],
   ["LL", "La Liga"],
+  ["BL", "Bundesliga"],
+  ["SA", "Serie A"],
+  ["T1", "Türkiye 1. Lig"],
+  ["T2", "Türkiye 2. Lig"],
+  ["T3", "Türkiye 3. Lig"],
 ];
 
 type DateRange = "TODAY" | "TOMORROW" | "NEXT3" | "NEXT7" | "ALL" | "CUSTOM";
