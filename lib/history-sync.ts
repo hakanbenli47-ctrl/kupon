@@ -114,11 +114,29 @@ async function importBatch(job:Job,index:number,limit:number,db:SqliteDb){
     if(!src)return {more:false,stored:0,goalsSaved:0,scanned:0};
     const week=index+1;
     if(week>src.maxWeek)return {more:false,stored:0,goalsSaved:0,scanned:0};
-    const url="https://www.tff.org/Default.aspx?pageID="+src.page+"&hafta="+week;
-    const raw=await snapshotText(url);
-    const found=parseTffRows(raw,job.league,url).filter(f=>f.status==="FINISHED");
-    if(found.length>limit)throw Error("TFF weekly results exceed batch capacity");
-    fixtures=found.map(f=>({fixture:f,goals:[]}));
+    const base="https://www.tff.org/Default.aspx?pageID="+src.page;
+    const indexHtml=await snapshotText(base);
+    const groups=new Set<string>();
+    for(const match of indexHtml.matchAll(/<a\\b([^>]+)>([\\s\\S]*?)<\\/a>/gi)){
+      const label=match[2].replace(/<[^>]*>/g,"").replace(/&nbsp;/g," ").trim();
+      if(!/^(?:beyaz|kırmızı|[1-4]\\. grup)$/i.test(label))continue;
+      const href=match[1].match(/href=["']([^"']+)["']/i)?.[1]||"";
+      const group=href.match(/grupID=(\\d+)/i)?.[1];
+      if(group)groups.add(group);
+    }
+    const ids=[...groups];
+    const urls=(ids.length?ids.map(id=>base+"&grupID="+id):[base])
+      .map(url=>url+"&hafta="+week);
+    const pages=await Promise.allSettled(urls.map(snapshotText));
+    const found=new Map<string,ImportedMatch>();
+    for(const [i,result] of pages.entries()){
+      if(result.status!=="fulfilled")continue;
+      for(const item of parseTffRows(result.value,job.league,urls[i])){
+        if(item.status==="FINISHED")found.set(item.external_id,item);
+      }
+    }
+    if(found.size>limit)throw Error("TFF weekly results exceed batch capacity");
+    fixtures=[...found.values()].map(f=>({fixture:f,goals:[]}));
     more=week<src.maxWeek;
   }
   let stored=0,goalsSaved=0;
