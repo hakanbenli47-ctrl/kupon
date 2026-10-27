@@ -21,6 +21,8 @@ type Fixture = {
   id: number;
   kickoff_utc: string;
   status: string;
+  home_goals: number | null;
+  away_goals: number | null;
   competition_code: string;
   competition: string;
   home_team: string;
@@ -192,6 +194,8 @@ export default function Dashboard() {
   const [analysisFilter, setAnalysisFilter] = useState<AnalysisFilter>("ALL");
   const [teamQuery, setTeamQuery] = useState("");
   const [busy, setBusy] = useState(false);
+  const [updatingData, setUpdatingData] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState("");
   const [error, setError] = useState("");
   const [mainView, setMainView] = useState<MainView>("ANALYSIS");
   const [couponTab, setCouponTab] = useState<CouponTab>("READY");
@@ -247,6 +251,32 @@ export default function Dashboard() {
 
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => { if (document.visibilityState === "visible") void load(); }, 90_000);
+    return () => window.clearInterval(interval);
+  }, [load]);
+
+  const updateRealData = async () => {
+    setUpdatingData(true);
+    setUpdateMessage("");
+    try {
+      const fixtureResponse = await fetch("/api/refresh-fixtures", {method:"POST"});
+      const fixtures = await fixtureResponse.json();
+      if (!fixtureResponse.ok || !fixtures.ok) throw new Error(fixtures.error || "Fikstürler güncellenemedi.");
+      const scoreResponse = await fetch("/api/refresh-results", {method:"POST"});
+      const scores = await scoreResponse.json();
+      if (!scoreResponse.ok || !scores.ok) throw new Error(scores.error || "Skorlar güncellenemedi.");
+      await load();
+      const added = Number(fixtures.update?.added || 0);
+      const closed = Number(scores.updated || 0);
+      setUpdateMessage(`Veriler kontrol edildi · ${added} yeni fikstür · ${closed} tamamlanmış maç güncellendi.`);
+    } catch(e) {
+      setUpdateMessage(e instanceof Error?e.message:"Veri güncellemesi başarısız.");
+    } finally {
+      setUpdatingData(false);
+    }
+  };
 
   const analyze = async (openCoupons = false) => {
     setBusy(true);
@@ -409,6 +439,9 @@ export default function Dashboard() {
           <span className="sync-text">
             {data?.lastSync?.finished_at ? `Son veri: ${formatDate(data.lastSync.finished_at)}` : "İlk veri güncellemesi bekleniyor"}
           </span>
+          <button className="primary-button" onClick={() => void updateRealData()} disabled={updatingData}>
+            {updatingData ? "Maçlar kontrol ediliyor…" : "Maç ve Skor Güncelle"}
+          </button>
           <button className="primary-button" onClick={() => analyze(true)} disabled={busy}>
             {busy ? "Kupon hazırlanıyor…" : "Otomatik Kupon Hazırla"}
           </button>
@@ -429,6 +462,7 @@ export default function Dashboard() {
       </section>
 
       {error && <div className="error-banner" role="alert">{error}</div>}
+      {updateMessage && <p role="status" className="manual-message">{updateMessage}</p>}
 
       <section className="metrics" aria-label="Özet" hidden={mainView !== "ANALYSIS"}>
         <article><span>Yaklaşan maç</span><strong>{data?.metrics.upcoming ?? "—"}</strong><small>31 günlük fikstür</small></article>
@@ -528,7 +562,7 @@ export default function Dashboard() {
                     <span className="league-code">{fixture.competition_code}</span>
                     <time>{formatFixtureDate(fixture.kickoff_utc, fixture.status)}</time>
                   </div>
-                  <div className="teams"><strong>{fixture.home_team}</strong><span>—</span><strong>{fixture.away_team}</strong></div>
+                  <div className="teams"><strong>{fixture.home_team}</strong><span>{fixture.status === "FINISHED" && fixture.home_goals !== null && fixture.away_goals !== null ? `${fixture.home_goals} - ${fixture.away_goals}` : "—"}</span><strong>{fixture.away_team}</strong></div>
                   <div className="markets">
                     {fixture.predictions.length ? fixture.predictions.map((prediction) => (
                       <span key={prediction.id} className={best?.id === prediction.id ? "market best" : "market"}>
