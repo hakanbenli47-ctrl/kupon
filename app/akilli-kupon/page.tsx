@@ -75,6 +75,7 @@ export default function SmartCouponsPage() {
   const [error,setError] = useState("");
   const [date,setDate] = useState("");
   const attemptedFirstImport=useRef(false);
+  const attemptedFirstHistory=useRef(false);
   const [count,setCount] = useState(5);
   const [quality,setQuality] = useState(0.65);
   const [choice,setChoice] = useState<MarketChoice>("TUMU");
@@ -129,6 +130,19 @@ export default function SmartCouponsPage() {
     }catch(e){setRefreshMessage(e instanceof Error?e.message:"Geçmiş veri işlemi başarısız.");}
     finally{setLoadingHistory(false);setRefresh(x=>x+1);}
   }
+  useEffect(()=>{
+    if(!data||attemptedFirstHistory.current)return;
+    attemptedFirstHistory.current=true;
+    const upcoming=data.fixtures.filter(f=>{
+      const start=Date.parse(f.kickoff_utc);
+      return ["TIMED","SCHEDULED"].includes(f.status)
+        && start>Date.now() && start<Date.now()+7*86_400_000;
+    });
+    if(upcoming.length>0 && upcoming.every(f=>f.predictions.length===0)){
+      void updateHistory();
+    }
+  },[data]);
+
   useEffect(()=>{
     const timer=window.setInterval(()=>setRefresh(value=>value+1),90_000);
     return ()=>window.clearInterval(timer);
