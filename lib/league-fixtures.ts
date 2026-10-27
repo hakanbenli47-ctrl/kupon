@@ -75,11 +75,19 @@ export function parseTffRows(html:string,code:string,sourceUrl:string): Imported
         const kickoff=trDateUtc(dateParts[1],dateParts[2],dateParts[3],timeParts[1],timeParts[2]);
         const home=plainHtml(officialHome),away=plainHtml(officialAway);
         if(kickoff && home && away && canonicalTeam(home)!==canonicalTeam(away)){
+          const afterHome=row.indexOf(officialHome)+officialHome.length;
+          const beforeAway=row.lastIndexOf(officialAway);
+          const between=beforeAway>afterHome?plainHtml(row.slice(afterHome,beforeAway)):"";
+          const visibleScore=between.match(/(?:^|\s)(\d{1,2})\s*[-:]\s*(\d{1,2})(?:$|\s)/);
+          const verifiedScore=Boolean(visibleScore && Date.now()>Date.parse(kickoff)+4*3600_000);
           const external_id=`tff-${code}-${officialId}`;
           unique.set(external_id,{
             external_id,competition_code:code,kickoff_utc:kickoff,
-            home_team:home,away_team:away,status:"TIMED",
-            home_goals:null,away_goals:null,source_name:"TFF Resmî Fikstür",
+            home_team:home,away_team:away,
+            status:verifiedScore?"FINISHED":"TIMED",
+            home_goals:verifiedScore?Number(visibleScore![1]):null,
+            away_goals:verifiedScore?Number(visibleScore![2]):null,
+            source_name:"TFF Resmî Fikstür",
             source_url:`https://www.tff.org/Default.aspx?pageID=29&macId=${officialId}`,
           });
           continue;
