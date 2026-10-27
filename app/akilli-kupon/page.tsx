@@ -17,6 +17,7 @@ type Fixture = {
   kickoff_utc: string;
   source_checked_at: string;
   competition: string;
+  competition_code: string;
   home_team: string;
   away_team: string;
   predictions: Prediction[];
@@ -70,6 +71,7 @@ export default function SmartCouponsPage() {
   const [count,setCount] = useState(5);
   const [quality,setQuality] = useState(0.65);
   const [choice,setChoice] = useState<MarketChoice>("TUMU");
+  const [league,setLeague] = useState("ALL");
   const [kickoffTime,setKickoffTime] = useState("AUTO");
   const [refreshing,setRefreshing] = useState(false);
   const [refreshMessage,setRefreshMessage] = useState("");
@@ -92,20 +94,24 @@ export default function SmartCouponsPage() {
   },[]);
   async function refreshResults(){
     setRefreshing(true);setRefreshMessage("");
-    try {
-      const response=await fetch("/api/refresh-results",{method:"POST",cache:"no-store"});
-      const result=await response.json() as {ok?:boolean; updated?:number; error?:string; skipped?:boolean};
-      if(!response.ok || !result.ok)throw Error(result.error||"Sonuçlar güncellenemedi.");
-      setRefreshMessage(result.skipped?"Veriler kısa süre önce kontrol edildi.":`Güncellendi: ${result.updated??0} doğrulanmış yeni skor.`);
+    try{
+      const fixtureResponse=await fetch("/api/refresh-fixtures",{method:"POST",cache:"no-store"});
+      const fixtures=await fixtureResponse.json() as {ok?:boolean;update?:{added?:number};skipped?:boolean;error?:string};
+      if(!fixtureResponse.ok||!fixtures.ok)throw Error(fixtures.error||"Fikstürler güncellenemedi.");
+      const resultResponse=await fetch("/api/refresh-results",{method:"POST",cache:"no-store"});
+      const result=await resultResponse.json() as {ok?:boolean;updated?:number;error?:string;skipped?:boolean};
+      if(!resultResponse.ok||!result.ok)throw Error(result.error||"Skorlar güncellenemedi.");
+      setRefreshMessage(`Kontrol edildi: ${fixtures.update?.added??0} yeni maç, ${result.updated??0} yeni final skor.`);
     }catch(error){setRefreshMessage(error instanceof Error?error.message:"Güncelleme başarısız.");}
     finally{setRefreshing(false);setRefresh(x=>x+1);}
   }
 
   const fixtures = useMemo(() => (data?.fixtures ?? []).filter(f=>
     day(f.kickoff_utc)===date &&
+    (league === "ALL" || f.competition_code === league) &&
     ["SCHEDULED","TIMED"].includes(f.status) &&
     new Date(f.kickoff_utc).getTime() > Date.now()
-  ),[data,date]);
+  ),[data,date,league]);
   const selectionMap = useMemo(() => new Map(fixtures.map(f=>[f.id,f])),[fixtures]);
   const available = useMemo(() => fixtures.flatMap(f=>
     f.predictions.filter(p=>choice==="TUMU"||p.selection===choice)
@@ -166,7 +172,7 @@ export default function SmartCouponsPage() {
     {stale && <p role="alert" className="mb-5 border-l-4 border-amber-500 bg-amber-50 p-4 text-sm">
       Son veri senkronizasyonu güncel değil veya başarısız. Tahminleri kullanmadan önce kaynakları doğrula.
     </p>}
-    <section className="mb-6 grid gap-4 rounded-2xl border border-[#dce2dc] bg-white p-5 md:grid-cols-5" aria-label="Analiz tercihleri">
+    <section className="mb-6 grid gap-4 rounded-2xl border border-[#dce2dc] bg-white p-5 md:grid-cols-3 xl:grid-cols-6" aria-label="Analiz tercihleri">
       <label className="grid gap-2 text-sm font-semibold">Maç tarihi
         <input type="date" value={date} min={day(new Date())} onChange={e=>{setDate(e.target.value);setKickoffTime("AUTO");}}
           className="w-full rounded-lg border border-[#c8d6ce] p-3"/>
@@ -175,6 +181,18 @@ export default function SmartCouponsPage() {
         <select value={count} onChange={e=>setCount(Number(e.target.value))}
           className="rounded-lg border border-[#c8d6ce] p-3">
           {[2,3,4,5,6].map(n=><option key={n} value={n}>{n} maç</option>)}
+        </select>
+      </label>
+      <label className="grid gap-2 text-sm font-semibold">Lig seçimi
+        <select value={league} onChange={e=>{setLeague(e.target.value);setKickoffTime("AUTO");}}
+          className="rounded-lg border border-[#c8d6ce] p-3">
+          {[
+            ["ALL","Tüm ligler"],["TSL","Türkiye Süper Lig"],["T1","Türkiye 1. Lig"],
+            ["T2","Türkiye 2. Lig"],["T3","Türkiye 3. Lig"],
+            ["BL","Almanya Bundesliga"],["SA","İtalya Serie A"],
+            ["PL","İngiltere Premier Lig"],["LL","İspanya La Liga"],
+            ["CL","Şampiyonlar Ligi"],["EL","Avrupa Ligi"],["ECL","Konferans Ligi"],
+          ].map(([id,title])=><option key={id} value={id}>{title}</option>)}
         </select>
       </label>
       <label className="grid gap-2 text-sm font-semibold">Gol tercihi
