@@ -21,3 +21,4 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm run test:optimizer
       - run: npm run test:v4
+      - run: npm run test:season

@@ -1,5 +1,2 @@
-import Dashboard from "./dashboard";
-
-export default function Home() {
-  return <Dashboard />;
-}
+import SeasonDesk from "./season-desk";
+export default function Home(){return <SeasonDesk initialView="fixture"/>;}

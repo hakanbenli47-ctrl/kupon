@@ -13,7 +13,8 @@
     "data:coverage": "node scripts/report-uefa-coverage.mjs",
     "db:backup": "node scripts/backup-db.mjs",
     "test:optimizer": "node --experimental-strip-types --test tests/coupon-optimizer.test.mjs",
-    "test:v4": "node --experimental-strip-types --test tests/model-v4.test.mjs"
+    "test:v4": "node --experimental-strip-types --test tests/model-v4.test.mjs",
+    "test:season": "node --experimental-strip-types --test tests/season-parser.test.mjs"
   },
   "dependencies": {
     "@libsql/client": "^0.17.4",

@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "./season-desk.css";
 
 export const metadata: Metadata = {
-  title: "Kupon Analiz | Gol Tahmin Paneli",
-  description: "15 günlük fikstür ve 1.5, 2.5, 3.5 Alt/Üst olasılık analizi.",
+  title: "Fikstür Lab | 2026–27 Sezonu",
+  description: "2026–27 resmî maç fikstürleri, sezon sonuçları, gol istatistikleri ve olasılık analiz merkezi.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

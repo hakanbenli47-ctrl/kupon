@@ -8,6 +8,10 @@
     {
       "path": "/api/cron/results",
       "schedule": "0 0 * * *"
+    },
+    {
+      "path": "/api/cron/season",
+      "schedule": "25 3 * * *"
     }
   ]
 }
