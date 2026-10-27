@@ -142,13 +142,20 @@ async function saveFixture(db:SqliteDb,fixture:ImportedMatch) {
     const manual=await db.get("SELECT fixture_id FROM manual_fixture_results WHERE fixture_id=?",[target.id]);
     if(!manual){
       await db.run(`UPDATE fixtures SET
-        status=CASE WHEN ?=1 THEN 'FINISHED' ELSE status END,
-        home_goals=CASE WHEN ?=1 THEN ? ELSE home_goals END,
-        away_goals=CASE WHEN ?=1 THEN ? ELSE away_goals END,
-        source_checked_at=?,updated_at=CURRENT_TIMESTAMP
+        kickoff_utc=CASE WHEN status IN ('FINISHED','POSTPONED','CANCELLED')
+          THEN kickoff_utc ELSE ? END,
+        status=CASE WHEN status IN ('FINISHED','POSTPONED','CANCELLED')
+          THEN status WHEN ?=1 THEN 'FINISHED' ELSE ? END,
+        home_goals=CASE WHEN ?=1 AND status NOT IN ('POSTPONED','CANCELLED')
+          THEN ? ELSE home_goals END,
+        away_goals=CASE WHEN ?=1 AND status NOT IN ('POSTPONED','CANCELLED')
+          THEN ? ELSE away_goals END,
+        source_url=?,source_name=?,source_checked_at=?,updated_at=CURRENT_TIMESTAMP
         WHERE id=?`,[
-        verifiedFinal?1:0,verifiedFinal?1:0,fixture.home_goals,
-        verifiedFinal?1:0,fixture.away_goals,new Date().toISOString(),target.id,
+        fixture.kickoff_utc,verifiedFinal?1:0,fixture.status,
+        verifiedFinal?1:0,fixture.home_goals,
+        verifiedFinal?1:0,fixture.away_goals,
+        fixture.source_url,fixture.source_name,new Date().toISOString(),target.id,
       ]);
     }
     return "updated";
