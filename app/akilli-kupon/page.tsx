@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
-  conservativeProbability, expectedValue, rankSelections,
+  conservativeProbability, expectedValue, rankSelections, kickoffSlot,
   type CouponCandidate, type RankedCandidate,
 } from "@/lib/coupon-optimizer";
 
@@ -70,6 +70,9 @@ export default function SmartCouponsPage() {
   const [count,setCount] = useState(5);
   const [quality,setQuality] = useState(0.65);
   const [choice,setChoice] = useState<MarketChoice>("TUMU");
+  const [kickoffTime,setKickoffTime] = useState("AUTO");
+  const [refreshing,setRefreshing] = useState(false);
+  const [refreshMessage,setRefreshMessage] = useState("");
   const [odds,setOdds] = useState<Record<number,string>>({});
   const [stake,setStake] = useState("");
   const [showAll,setShowAll] = useState(false);
@@ -83,6 +86,20 @@ export default function SmartCouponsPage() {
       });
     return ()=>abort.abort();
   },[refresh]);
+  useEffect(()=>{
+    const timer=window.setInterval(()=>setRefresh(value=>value+1),90_000);
+    return ()=>window.clearInterval(timer);
+  },[]);
+  async function refreshResults(){
+    setRefreshing(true);setRefreshMessage("");
+    try {
+      const response=await fetch("/api/refresh-results",{method:"POST",cache:"no-store"});
+      const result=await response.json() as {ok?:boolean; updated?:number; error?:string; skipped?:boolean};
+      if(!response.ok || !result.ok)throw Error(result.error||"Sonuçlar güncellenemedi.");
+      setRefreshMessage(result.skipped?"Veriler kısa süre önce kontrol edildi.":`Güncellendi: ${result.updated??0} doğrulanmış yeni skor.`);
+    }catch(error){setRefreshMessage(error instanceof Error?error.message:"Güncelleme başarısız.");}
+    finally{setRefreshing(false);setRefresh(x=>x+1);}
+  }
 
   const fixtures = useMemo(() => (data?.fixtures ?? []).filter(f=>
     day(f.kickoff_utc)===date &&
@@ -92,10 +109,34 @@ export default function SmartCouponsPage() {
   const selectionMap = useMemo(() => new Map(fixtures.map(f=>[f.id,f])),[fixtures]);
   const available = useMemo(() => fixtures.flatMap(f=>
     f.predictions.filter(p=>choice==="TUMU"||p.selection===choice)
-      .map(p=>({...p, fixture_id:f.id}))
+      .map(p=>({...p, fixture_id:f.id, kickoff_utc:f.kickoff_utc}))
   ),[fixtures,choice]);
   const ranked = useMemo(()=>rankSelections(available,quality),[available,quality]);
-  const choices = useMemo(()=>ranked.filter(p=>p.conservative_probability>=0.62).slice(0,count),[ranked,count]);
+  const timeGroups=useMemo(()=>{
+    const groups=new Map<string,RankedCandidate[]>();
+    for (const pick of ranked) {
+      const slot=kickoffSlot(pick.kickoff_utc);
+      if(!slot)continue;
+      const group=groups.get(slot)||[];
+      group.push(pick);
+      groups.set(slot,group);
+    }
+    return [...groups.entries()].sort((a,b)=> {
+      const av=a[1].filter(p=>p.conservative_probability>=0.62);
+      const bv=b[1].filter(p=>p.conservative_probability>=0.62);
+      const aEnough=av.length>=count, bEnough=bv.length>=count;
+      if(aEnough!==bEnough) return aEnough?-1:1;
+      if(aEnough&&bEnough) {
+        const ap=av.slice(0,count).reduce((sum,p)=>sum*p.conservative_probability,1);
+        const bp=bv.slice(0,count).reduce((sum,p)=>sum*p.conservative_probability,1);
+        if(ap!==bp) return bp-ap;
+      }
+      return bv.length-av.length || a[0].localeCompare(b[0]);
+    });
+  },[ranked,count]);
+  const selectedTime=kickoffTime==="AUTO" ? timeGroups[0]?.[0] : kickoffTime;
+  const sameTimeRanked=ranked.filter(p=>kickoffSlot(p.kickoff_utc)===selectedTime);
+  const choices = sameTimeRanked.filter(p=>p.conservative_probability>=0.62).slice(0,count);
   const sufficient = choices.length === count;
   const joint = sufficient ? choices.reduce((value,p)=>value*p.conservative_probability,1) : null;
   const scenarioWins = useMemo(() => sufficient ? simulate(choices.map(p=>p.conservative_probability)):null,[choices,sufficient]);
@@ -113,20 +154,21 @@ export default function SmartCouponsPage() {
         <Link href="/" className="text-sm font-semibold text-[#176b45]">← Ana panele dön</Link>
         <h1 className="mt-3 text-3xl font-bold tracking-tight md:text-5xl">Akıllı Kupon Laboratuvarı</h1>
         <p className="mt-2 max-w-2xl text-sm text-[#566a5a]">
-          Gol olasılıkları, veri güvenilirliği, kupon riski ve gerçek oran karşılaştırması. Garantili tahmin yoktur.
+          Yalnızca aynı gün ve aynı saatteki maçlarla gol olasılıkları, veri kalitesi ve kupon riskini karşılaştırır.
         </p>
       </div>
-      <button className="rounded-xl border border-[#c8d6ce] bg-white px-4 py-3 text-sm font-semibold"
-        onClick={()=>{setData(null);setError("");setRefresh(n=>n+1);}}>Veriyi yenile</button>
+      <button disabled={refreshing} className="rounded-xl border border-[#c8d6ce] bg-white px-4 py-3 text-sm font-semibold disabled:opacity-50"
+        onClick={refreshResults}>{refreshing?"Skorlar kontrol ediliyor…":"Maç ve skorları güncelle"}</button>
     </header>
 
+    {refreshMessage && <p role="status" className="mb-4 text-sm text-[#176b45]">{refreshMessage}</p>}
     {error && <p role="alert" className="mb-5 rounded-xl bg-red-50 p-4 text-red-800">{error}</p>}
     {stale && <p role="alert" className="mb-5 border-l-4 border-amber-500 bg-amber-50 p-4 text-sm">
       Son veri senkronizasyonu güncel değil veya başarısız. Tahminleri kullanmadan önce kaynakları doğrula.
     </p>}
-    <section className="mb-6 grid gap-4 rounded-2xl border border-[#dce2dc] bg-white p-5 md:grid-cols-4" aria-label="Analiz tercihleri">
+    <section className="mb-6 grid gap-4 rounded-2xl border border-[#dce2dc] bg-white p-5 md:grid-cols-5" aria-label="Analiz tercihleri">
       <label className="grid gap-2 text-sm font-semibold">Maç tarihi
-        <input type="date" value={date} min={day(new Date())} onChange={e=>setDate(e.target.value)}
+        <input type="date" value={date} min={day(new Date())} onChange={e=>{setDate(e.target.value);setKickoffTime("AUTO");}}
           className="w-full rounded-lg border border-[#c8d6ce] p-3"/>
       </label>
       <label className="grid gap-2 text-sm font-semibold">Kupondaki maç sayısı
@@ -139,6 +181,13 @@ export default function SmartCouponsPage() {
         <select value={choice} onChange={e=>setChoice(e.target.value as MarketChoice)}
           className="rounded-lg border border-[#c8d6ce] p-3">
           <option value="TUMU">Alt ve üst</option><option value="UST">Yalnızca üst</option><option value="ALT">Yalnızca alt</option>
+        </select>
+      </label>
+      <label className="grid gap-2 text-sm font-semibold">Başlama saati (Türkiye)
+        <select value={kickoffTime} onChange={e=>setKickoffTime(e.target.value)}
+          className="rounded-lg border border-[#c8d6ce] p-3">
+          <option value="AUTO">Otomatik: en güçlü saat</option>
+          {timeGroups.map(([slot,matches])=><option key={slot} value={slot}>{slot.slice(11)} · {matches.length} maç</option>)}
         </select>
       </label>
       <label className="grid gap-2 text-sm font-semibold">Asgari veri kalitesi
@@ -163,13 +212,13 @@ export default function SmartCouponsPage() {
     <div className="grid gap-6 lg:grid-cols-[1.55fr_1fr]">
       <section className="rounded-2xl border border-[#dce2dc] bg-white p-5">
         <div className="mb-5">
-          <h2 className="text-2xl font-bold">Seçilen kupon</h2>
+          <h2 className="text-2xl font-bold">Seçilen kupon {selectedTime?"· "+selectedTime.slice(11):""}</h2>
           <p className="mt-1 text-sm text-[#566a5a]">Her maçtan yalnızca bir gol bahsi seçilir. Olasılıklara veri eksikliği indirimi uygulanır.</p>
         </div>
         {!data && !error && <p role="status">Güncel maçlar yükleniyor…</p>}
         {data && !sufficient && <div className="rounded-xl bg-[#f0f3ed] p-5">
           <strong>Güvenilir kupon oluşturulamadı.</strong>
-          <p className="mt-1 text-sm">İstenen {count} maç için yeterli kaliteli veri yok. Uygulama kuponu doldurmak için zayıf maç eklemez. Eşiği veya maç sayısını değiştirebilirsin.</p>
+          <p className="mt-1 text-sm">Aynı gün ve aynı başlama saatinde {count} yeterli kaliteli maç bulunamadı. Farklı saatten maç eklenmez. Saati veya maç sayısını değiştirebilirsin.</p>
         </div>}
         {sufficient && <div className="space-y-3">
           {choices.map((p,index)=>{
