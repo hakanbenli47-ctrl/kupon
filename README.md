@@ -1,5 +1,16 @@
 # Kupon Analiz
 
+## Akıllı Kupon Laboratuvarı (v2.2)
+
+- `/akilli-kupon` ekranında bugün/yarın/tarih, 2–6 maç, üst/alt, veri kalitesi filtresi ve 10.000 senaryoluk gösterim bulunur.
+- 1.5, 2.5, 3.5 gol piyasalarında mevcut model tahminlerini değerlendirir. Alternatif alt/üst sonuçları ham Poisson dağılımıdır ve kalibrasyonsuz olarak işaretlenir.
+- Her maçtan bir bahis seçilir; zayıf istatistik kapsamı olan maçlar filtrelenir ve kupon sayısını doldurmak için tekrar ya da zayıf maç eklenmez.
+- Olasılıklara veri kalitesine bağlı temkinlilik indirimi uygulanır. Bu bir istatistiksel güven aralığı ya da gerçek kazanma garantisi değildir.
+- Gerçek bahis oranları henüz entegre edilmediği için kullanıcı oranları girince beklenti (EV), adil oran ve varsayımsal ödeme hesaplanır; gerçek bahis oynamaz.
+- Uygun istatistik yoksa hiçbir kupon önermemek normaldir. Modelin tarihî testleri, kalibrasyon ve gerçek piyasa oranları olmadan sürekli kazanç vaadi yapılamaz.
+- Temel test: `npm run test:optimizer`.
+
+
 Turso üzerinde kalıcı veri havuzu kullanan, 31 günlük fikstürü analiz eden gol tahmin paneli. Yalnızca 1.5, 2.5 ve 3.5 Alt/Üst piyasalarını değerlendirir. Tahminler garanti değildir.
 
 ## Veri ve çalışma düzeni
