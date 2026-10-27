@@ -217,9 +217,13 @@ export function sampleScorelines(matrix:number[][],iterations=10000,seed=3219876
       const key=(total>line?"O":"U")+line as MarketName;
       marketHits[key]=(marketHits[key]||0)+1;
     }
-    for(const key of [h>a?"1":h<a?"2":"X",h>=a?"1X":"X2",h!==a?"12":"X",
-      h>0&&a>0?"BTTS_Y":"BTTS_N"] as MarketName[])
-      marketHits[key]=(marketHits[key]||0)+1;
+    const keys:MarketName[]=[
+      h>a?"1":h<a?"2":"X",h>=a?"1X":"X2",
+      h>0&&a>0?"BTTS_Y":"BTTS_N",
+    ];
+    if(h!==a)keys.push("12");
+    if(h===a)keys.push("1X","X2");
+    for(const key of keys)marketHits[key]=(marketHits[key]||0)+1;
   }
   return {iterations,
     scores:[...goals.entries()].map(([score,count])=>({score,count})).sort((a,b)=>b.count-a.count).slice(0,8),
