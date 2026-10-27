@@ -15,7 +15,7 @@ export const LEAGUE_SOURCES = [
 export const TFF_SOURCES = [
   {code:"T1",name:"Trendyol 1. Lig",country:"Türkiye",page:142,yearStart:"2026-08-07",maxWeek:38},
   {code:"T2",name:"Nesine 2. Lig",country:"Türkiye",page:976,yearStart:"2026-09-06",maxWeek:36},
-  {code:"T3",name:"Nesine 3. Lig",country:"Türkiye",page:971,yearStart:"2026-09-06",maxWeek:30},
+  {code:"T3",name:"Nesine 3. Lig",country:"Türkiye",page:971,yearStart:"2026-09-06",maxWeek:34},
 ] as const;
 
 type ImportedMatch = {
@@ -48,8 +48,12 @@ function plainHtml(input:string){
     .replace(/<[^>]+>/g," ")).replace(/\s+/g," ").trim();
 }
 function trDateUtc(dd:string,mm:string,yyyy:string,hh:string,min:string) {
-  const date=new Date(Date.UTC(Number(yyyy),Number(mm)-1,Number(dd),Number(hh)-3,Number(min)));
-  return Number.isFinite(date.getTime())&&date.getUTCFullYear()===Number(yyyy)?date.toISOString():null;
+  const h=Number(hh),minute=Number(min),year=Number(yyyy),month=Number(mm),day=Number(dd);
+  if(h>23 || minute>59 || month<1 || month>12 || day<1 || day>31)return null;
+  const date=new Date(Date.UTC(year,month-1,day,h-3,minute));
+  const local=new Date(date.getTime()+3*3600_000);
+  return Number.isFinite(date.getTime())&&local.getUTCFullYear()===year
+    &&local.getUTCMonth()+1===month&&local.getUTCDate()===day ? date.toISOString():null;
 }
 
 export function parseTffRows(html:string,code:string,sourceUrl:string): ImportedMatch[] {
@@ -90,7 +94,8 @@ function rounds(page:typeof TFF_SOURCES[number]) {
 async function requestText(url:string){
   const response=await fetch(url,{headers:{Accept:"text/html"},cache:"no-store",signal:AbortSignal.timeout(10_000)});
   if(!response.ok)throw Error(`TFF HTTP ${response.status}`);
-  return response.text();
+  const bytes=await response.arrayBuffer();
+  return new TextDecoder("windows-1254").decode(bytes);
 }
 async function requestEspn(league:string,day:string){
   const url=`https://site.api.espn.com/apis/site/v2/sports/soccer/${league}/scoreboard?dates=${day}&limit=250`;
@@ -207,11 +212,11 @@ export async function importLeagueFixtures(maxPerLeague = 24) {
     const groupUrls=new Set<string>([baseUrl]);
     // Read group IDs from current season's own league selector links,
     // rather than guessing IDs from previous seasons.
-    for(const anchor of baseHtml.matchAll(/<a\\b([^>]+)>([\\s\\S]*?)<\\/a>/gi)){
+    for(const anchor of baseHtml.matchAll(/<a\b([^>]+)>([\s\S]*?)<\/a>/gi)){
       const label=plainHtml(anchor[2]).trim();
-      if(!/^(?:beyaz|kırmızı|0?[1-4](?:\\. grup)?|[1-4]\\. grup)$/i.test(label))continue;
+      if(!/^(?:beyaz|kırmızı|0?[1-4](?:\. grup)?|[1-4]\. grup)$/i.test(label))continue;
       const href=anchor[1].match(/href=["']([^"']+)["']/i)?.[1]||"";
-      const groupId=decodeHtml(href).match(/grupID=(\\d+)/i)?.[1];
+      const groupId=decodeHtml(href).match(/grupID=(\d+)/i)?.[1];
       if(groupId)groupUrls.add(`https://www.tff.org/Default.aspx?pageID=${league.page}&grupID=${groupId}`);
       if(groupUrls.size>=5)break;
     }
