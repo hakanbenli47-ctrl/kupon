@@ -31,9 +31,13 @@ type MarketChoice = "TUMU" | "ALT" | "UST";
 
 const pct = (p: number) => "%"+(p * 100).toFixed(1).replace(".", ",");
 const dec = (v: number) => v.toFixed(2).replace(".", ",");
-const day = (s: string | Date) => new Intl.DateTimeFormat("en-CA", {
-  timeZone: "Europe/Istanbul", year: "numeric", month: "2-digit", day: "2-digit",
-}).format(new Date(s));
+const day = (s: string | Date) => {
+  const parts=new Intl.DateTimeFormat("en-CA", {
+    timeZone:"Europe/Istanbul",year:"numeric",month:"2-digit",day:"2-digit",
+  }).formatToParts(new Date(s));
+  const field=(type:string)=>parts.find(p=>p.type===type)?.value||"";
+  return `${field("year")}-${field("month")}-${field("day")}`;
+};
 const tomorrow = () => day(new Date(Date.now() + 86_400_000));
 const formatTime = (s: string) => new Intl.DateTimeFormat("tr-TR",{
   timeZone:"Europe/Istanbul", hour:"2-digit", minute:"2-digit",
@@ -221,7 +225,7 @@ export default function SmartCouponsPage() {
         </select>
       </label>
       <label className="grid gap-2 text-sm font-semibold">Lig seçimi
-        <select value={league} onChange={e=>{setLeague(e.target.value);setKickoffTime("AUTO");}}
+        <select value={league} onChange={e=>{setLeague(e.target.value);setDate("");setKickoffTime("AUTO");}}
           className="rounded-lg border border-[#c8d6ce] p-3">
           {[
             ["ALL","Tüm ligler"],["TSL","Türkiye Süper Lig"],["T1","Türkiye 1. Lig"],
