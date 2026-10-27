@@ -8,7 +8,10 @@ export const dynamic="force-dynamic";
 export const maxDuration=60;
 
 // One history batch per user-triggered request. Locked to avoid hammering providers.
-export async function POST() {
+export async function POST(request:Request) {
+  const payload=await request.json().catch(()=>null) as {league?:string}|null;
+  const selectedLeague=typeof payload?.league==="string"
+    && /^[A-Z0-9]{2,4}$/.test(payload.league)?payload.league:undefined;
   const db=await getDb();
   const key="history-backfill-"+Math.floor(Date.now()/(4*60_000));
   const lock=await db.run("INSERT OR IGNORE INTO cloud_sync_locks(run_key,started_at,status) VALUES(?,?,'RUNNING')",
@@ -18,7 +21,7 @@ export async function POST() {
     return Response.json({ok:true,skipped:true,existing},{headers:{"Cache-Control":"no-store"}});
   }
   try{
-    const history=await runHistoryBackfill(32);
+    const history=await runHistoryBackfill(32,selectedLeague);
     const detail=await enrichEspnMatches(2);
     const analysis=await runAnalysis(3);
     const report={history,detail,analysis};
