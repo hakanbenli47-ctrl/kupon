@@ -4,6 +4,7 @@ import { getDb, type SqliteDb } from "./db";
 import { ensureSeedData } from "./seed";
 import { runAnalysis, settleFinishedResults } from "./analysis";
 import { findFixtureInScoreboard, loadLeagueScoreboard, type ScoreboardMatch } from "./scoreboard-feed";
+import { importLeagueFixtures } from "./league-fixtures";
 
 type SyncFixture = {
   id: number;
@@ -1153,6 +1154,10 @@ export async function runDailyCloudSync() {
   let completeGoalSets = 0;
   const errors: string[] = [];
   try {
+    const domesticAndForeignFixtures = await importLeagueFixtures(8).catch((error) => ({
+      added:0,updated:0,ignored:0,sources:[],
+      error:error instanceof Error?error.message:String(error),
+    }));
     const fixtureDiscovery = await runUefaFixtureDiscovery(18, false).catch((error) => ({
       ok: false,
       error: error instanceof Error ? error.message : String(error),
@@ -1244,6 +1249,7 @@ export async function runDailyCloudSync() {
       completeGoalSets,
       errors: errors.slice(0, 6),
       fixtureDiscovery,
+      domesticAndForeignFixtures,
       historyBackfill,
       statsBackfill,
       analysis,
@@ -1262,6 +1268,7 @@ export async function runDailyCloudSync() {
       updated,
       completeGoalSets,
       fixtureDiscovery,
+      domesticAndForeignFixtures,
       historyBackfill,
       statsBackfill,
       errors: errors.slice(0, 6),
