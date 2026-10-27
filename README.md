@@ -1,5 +1,21 @@
 # Kupon Analiz
 
+## V5 — 2026–27 sezon operasyon merkezi
+
+- Ana sayfa ve `/akilli-kupon` artık tek ve tamamen yeniden yazılmış, mobil uyumlu Fikstür/Lab arayüzünü açar. Oynanacak, oynanan, sezonun tamamı; lig ve takım araması, sayfalandırma, her maçın kaynak bağlantısı, veri kapsamı ve model analizi bulunur.
+- `/api/season` 1 Temmuz 2026–1 Temmuz 2027 arasında veritabanına kaydedilmiş tüm fikstür ve maç sonuçlarını sayfalayarak sunar; 40 maç/sayfa. Oynanan sonuçlar `FINISHED` durumuna göre sınıflandırılır.
+- `/api/season/coverage` lig bazında oynanan, planlanan, doğrulanmış gol olayları, detay istatistik sayıları ve kaynağın gerçek durumunu gösterir. **Kaynağı tamamlanmış gibi işaretlemek ile içe aktarımın bitmesi aynı şey değildir.**
+- `/api/season/sync` kullanıcı isteğiyle 2026/27 kaynaklarından sınırlı sayıda bölümü işler; mevcut kaynak hatalarını da ayrıntılı raporlar. Üretimde Vercel `/api/cron/season` ile günlük kontrol yapılır, ilerleme `season_sync_progress` tablosunda saklanır.
+- Bundesliga, 2. Bundesliga ve 3. Liga: OpenLigaDB'de `bl1/bl2/bl3/2026` sezon snapshotları; tamamlanmış maçlarda `matchIsFinished` ve **yalnızca 90 dakika final skoru** doğrulanır. Gol dakikaları yalnızca olaylar toplam skorla eşleştiğinde eklenir.
+- Türkiye 1., 2., 3. Lig: TFF'nin lig/grup ve hafta bazlı sayfaları taranır; grup kimlikleri bu sezondan keşfedilir. Saati veya skoru kaynaktan doğrulanamayan karşılaşma için uydurma saat/skor yazılmaz. TFF sayfa yapısı değişirse hata verilir ve ilerleme korunur.
+- Premier League, La Liga, Süper Lig ve Serie A: ESPN'in desteklediği sezon tarih aralıkları sorgulanır. ESPN arayüzü gayriresmîdir ve bazı lig/tarih aralıkları eksik kalabilir; bunun kanıtı olmayan bilgi tam kabul edilmez.
+- Başlangıçta bulunan 1.066 adet statik 2026/27 fikstürü (Süper Lig 306, La Liga 380, Premier League 380) aynen tutulur. **Tohum verisi güncel skorları veya başlangıç saatini artık sıfırlayamaz.**
+- Çok fazla kayıt alınana kadar tam sezon kapsamı **garanti edilmez**. Lig bazında gerçek aktarım adımları ile kaynakların eksikleri görünür; tamamlanmış veri oranı veya geçmiş maç isabeti sahte üretilmez.
+- Algoritma V4'teki geriye dönük sınamayı kullanır. 10.000 simülasyon yeni bilgi üretmez, skor modelinin olasılıklarını örnekler. Bahis kararı veya banko garantisi değildir.
+
+Test: `npm run test:season`, `npm run test:v4`, `npm run test:optimizer`, `npx tsc --noEmit`.
+
+
 ## Kupon Motoru V4 — sıfırdan skor olasılığı analizi
 
 - `/akilli-kupon` artık ayrı bir V4 hesaplama motoruna bağlıdır. Eski V2.x olasılık yöntemleri yeni maçlara uygulanmaz.
