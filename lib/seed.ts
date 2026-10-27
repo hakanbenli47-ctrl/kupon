@@ -48,21 +48,7 @@ export async function ensureSeedData(db: SqliteDb) {
               external_id, competition_code, kickoff_utc, home_team_id, away_team_id,
               status, home_goals, away_goals, stage, source_name, source_url, source_checked_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(external_id) DO UPDATE SET
-              kickoff_utc=excluded.kickoff_utc,
-              status=CASE
-                WHEN EXISTS (SELECT 1 FROM manual_fixture_results mr WHERE mr.fixture_id=fixtures.id)
-                THEN fixtures.status ELSE excluded.status END,
-              home_goals=CASE
-                WHEN EXISTS (SELECT 1 FROM manual_fixture_results mr WHERE mr.fixture_id=fixtures.id)
-                THEN fixtures.home_goals ELSE excluded.home_goals END,
-              away_goals=CASE
-                WHEN EXISTS (SELECT 1 FROM manual_fixture_results mr WHERE mr.fixture_id=fixtures.id)
-                THEN fixtures.away_goals ELSE excluded.away_goals END,
-              stage=excluded.stage,
-              source_url=excluded.source_url,
-              source_checked_at=excluded.source_checked_at,
-              updated_at=CURRENT_TIMESTAMP
+            ON CONFLICT(external_id) DO NOTHING
           `,
           args: [
             fixture.external_id,
