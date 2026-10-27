@@ -1,5 +1,19 @@
 # Kupon Analiz
 
+## Kupon Motoru V4 — sıfırdan skor olasılığı analizi
+
+- `/akilli-kupon` artık ayrı bir V4 hesaplama motoruna bağlıdır. Eski V2.x olasılık yöntemleri yeni maçlara uygulanmaz.
+- Kaynaklı maç sonuçlarından 365 günlük lig geçmişi, iç/deplasman hücum ve savunma, ağırlıklı son form ve uygunsa xG istatistikleri kullanılır. Yetersiz veya şüpheli veri **tahmine dönüşmez**.
+- Tam skor matrisi (Poisson + düşük skor bağımlılığı), 1X2, çifte şans, alt/üst 1.5–3.5 ve KG pazarı aynı matristen hesaplanır.
+- 10.000 simülasyon her maç için üretilir, fakat tahmin sıralamasında analitik olasılık kullanılır. Bu simülasyon yeni bilgi veya test değildir.
+- Sadece aynı gün ve Türkiye yerel saati tam olarak aynı maçlardan kupon grubu oluşur; 5–6 yeterli maç yoksa sistem kuponu zorla tamamlamaz.
+- Veri kalite puanı **isabet oranı değildir**. Alt/üst seçimlerine veri eksikliğine dayalı risk indirimi uygulanır.
+- Bir maç için gerçek bahis oranını kullanıcı girerse modelin hesaplanan adil oranı ve beklenen değer karşılaştırılabilir; canlı oran/garanti kâr servisi yoktur.
+- Gerçek isabet, `/api/v4/backtest` aracılığıyla kronolojik dış örneklem testinde Brier skoru, log loss, 1X2 ve 2.5 gol isabetiyle ölçülür. Lig için yeterli test maçı bulunmazsa güvenilir başarı iddiası yoktur.
+- Otomatik skor sonuçları, geçmiş veri aktarma cursorları ve eski kupon tarihçesi korunur. Geçmiş maçlar cron ile kademeli tamamlanır; her ligin tam veri kapsamı garanti edilmez.
+- Model testleri `npm run test:v4`, mevcut kupon entegrasyonu testleri `npm run test:optimizer` ve TypeScript doğrulaması `npx tsc --noEmit`.
+
+
 ## Akıllı Kupon Laboratuvarı (v2.2)
 
 - `/akilli-kupon` ekranında bugün/yarın/tarih, 2–6 maç, üst/alt, veri kalitesi filtresi ve 10.000 senaryoluk gösterim bulunur.
