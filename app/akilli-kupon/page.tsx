@@ -113,7 +113,10 @@ export default function SmartCouponsPage() {
     setLoadingHistory(true);
     setRefreshMessage("");
     try{
-      const response=await fetch("/api/history-backfill",{method:"POST",cache:"no-store"});
+      const response=await fetch("/api/history-backfill",{
+        method:"POST",cache:"no-store",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({league:league==="ALL"?undefined:league}),
+      });
       const payload=await response.json() as {
         ok?:boolean;error?:string;skipped?:boolean;
         history?:{ok?:boolean;league?:string;stored?:number;goalsSaved?:number;error?:string};
