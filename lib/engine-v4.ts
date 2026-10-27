@@ -124,11 +124,13 @@ export async function backtestEngine(league?:string){
       beatsNaiveBaseline:stats.count>=80 && stats.brier<stats.baselineBrier};
   });
   const total=rows.reduce((v,x)=>v+x.count,0);
-  const average=(key:"brier"|"baselineBrier"|"logLoss"|"over25Brier")=>
+  const average=(key:"brier"|"baselineBrier"|"logLoss"|"over25Brier"|"winnerAccuracy"|"baselineAccuracy"|"over25Accuracy")=>
     total?rows.reduce((v,x)=>v+x[key]*x.count,0)/total:null;
   return {modelVersion:"engine-v4.0",asOf:new Date().toISOString(),
     total,totalBrier:average("brier"),baselineBrier:average("baselineBrier"),
     totalLogLoss:average("logLoss"),totalOver25Brier:average("over25Brier"),
+    winnerAccuracy:average("winnerAccuracy"),baselineAccuracy:average("baselineAccuracy"),
+    over25Accuracy:average("over25Accuracy"),
     leagues:rows,
     limitation:"Strict walk-forward matches only. Fixed naive baseline: 44% home, 27% draw, 29% away. Predictive scores do not guarantee future success.",
   };
