@@ -117,11 +117,11 @@ async function importBatch(job:Job,index:number,limit:number,db:SqliteDb){
     const base="https://www.tff.org/Default.aspx?pageID="+src.page;
     const indexHtml=await snapshotText(base);
     const groups=new Set<string>();
-    for(const match of indexHtml.matchAll(/<a\\b([^>]+)>([\\s\\S]*?)<\\/a>/gi)){
+    for(const match of indexHtml.matchAll(/<a\b([^>]+)>([\s\S]*?)<\/a>/gi)){
       const label=match[2].replace(/<[^>]*>/g,"").replace(/&nbsp;/g," ").trim();
-      if(!/^(?:beyaz|kırmızı|[1-4]\\. grup)$/i.test(label))continue;
+      if(!/^(?:beyaz|kırmızı|[1-4]\. grup)$/i.test(label))continue;
       const href=match[1].match(/href=["']([^"']+)["']/i)?.[1]||"";
-      const group=href.match(/grupID=(\\d+)/i)?.[1];
+      const group=href.match(/grupID=(\d+)/i)?.[1];
       if(group)groups.add(group);
     }
     const ids=[...groups];
