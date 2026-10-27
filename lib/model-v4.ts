@@ -239,6 +239,7 @@ export function scoreModel(
   const ordered=verifiedHistory(games).sort((a,b)=>a.kickoff.localeCompare(b.kickoff));
   const recent=ordered.slice(-Math.min(500,Math.max(20,holdoutCount)));
   let sumBrier=0,sumBase=0,sumLoss=0,sumO25=0,n=0;
+  let winnerHits=0,baselineHits=0,over25Hits=0;
   const rows:Array<{date:string;fixtureId:number;actual:string;home:number;draw:number;away:number}>=[];
   for(const g of recent){
     const f:ScheduledGame={
@@ -253,15 +254,21 @@ export function scoreModel(
     const p=outcomeProbabilities(pred)!;
     const actual=g.homeGoals>g.awayGoals?"1":g.homeGoals<g.awayGoals?"2":"X";
     const probs=[p.home,p.draw,p.away],truth=actual==="1"?0:actual==="X"?1:2;
+    const prediction=probs.indexOf(Math.max(...probs));
+    if(prediction===truth)winnerHits++;
+    if(truth===0)baselineHits++;
     sumBrier+=probs.reduce((s,x,i)=>s+(x-(i===truth?1:0))**2,0);
     const base=[0.44,0.27,0.29];
     sumBase+=base.reduce((s,x,i)=>s+(x-(i===truth?1:0))**2,0);
     sumLoss-=Math.log(Math.max(0.001,probs[truth]));
     const over=g.homeGoals+g.awayGoals>2?1:0;
     sumO25+=(p.over25-over)**2;
+    if(Number(p.over25>=0.5)===over)over25Hits++;
     rows.push({date:g.kickoff,fixtureId:g.id,actual,home:p.home,draw:p.draw,away:p.away});
     n++;
   }
   return {count:n,brier:n?sumBrier/n:0,baselineBrier:n?sumBase/n:0,
-    logLoss:n?sumLoss/n:0,over25Brier:n?sumO25/n:0,rows};
+    logLoss:n?sumLoss/n:0,over25Brier:n?sumO25/n:0,
+    winnerAccuracy:n?winnerHits/n:0,baselineAccuracy:n?baselineHits/n:0,
+    over25Accuracy:n?over25Hits/n:0,rows};
 }
