@@ -525,7 +525,7 @@ export async function settleFinishedResults() {
 
 async function buildCoupons(db: SqliteDb, generatedFor: string) {
   const rows = await db.all(`
-    SELECT p.id, p.fixture_id, p.market, p.selection,
+    SELECT p.id, p.fixture_id, f.kickoff_utc, p.market, p.selection,
            p.probability, p.data_quality, p.stats_coverage, p.sample_home, p.sample_away
     FROM predictions p JOIN fixtures f ON f.id = p.fixture_id
     WHERE p.is_active = 1 AND p.outcome IS NULL AND f.status IN ('SCHEDULED','TIMED')
