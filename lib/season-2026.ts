@@ -1,6 +1,7 @@
 import "server-only";
 import { getDb, type SqliteDb } from "./db";
 import { ensureSeedData } from "./seed";
+import { parseOpenLigaSeason } from "./season-parser";
 import { LEAGUE_SOURCES, TFF_SOURCES, requestEspn, parseTffRows, saveFixture,
   type ImportedMatch } from "./league-fixtures";
 
@@ -19,11 +20,7 @@ type Progress={
 };
 type Job={provider:"OPENLIGA"|"ESPN"|"TFF";code:string;part:string;cursor:number;max:number};
 const dateCompact=(ms:number)=>new Date(ms).toISOString().slice(0,10).replace(/-/g,"");
-const numeric=(v:unknown):number|null=>{
-  if(v===null||v===undefined||String(v).trim()==="")return null;
-  const n=Number(v);
-  return Number.isInteger(n)&&n>=0&&n<=30?n:null;
-};
+
 async function jsonFrom(url:string){
   const res=await fetch(url,{cache:"no-store",headers:{Accept:"application/json"},signal:AbortSignal.timeout(12_000)});
   if(!res.ok)throw Error("HTTP "+res.status+" "+new URL(url).host);
@@ -57,36 +54,7 @@ async function groupCodes(league:{code:string;page:number}):Promise<Array<{id:st
   if(!matched.size)throw Error(league.code+" için resmî TFF grup kimlikleri doğrulanamadı");
   return [...matched].map(([id,name])=>({id,name})).sort((a,b)=>a.name.localeCompare(b.name));
 }
-function openLigaMatches(raw:unknown,leagueCode:string):ImportedMatch[]{
-  if(!Array.isArray(raw))throw Error("OpenLigaDB geçerli maç listesi döndürmedi");
-  const result:ImportedMatch[]=[];
-  for(const data of raw){
-    if(!data||typeof data!=="object")continue;
-    const m=data as Record<string,unknown>;
-    const id=Number(m.matchID);
-    const iso=String(m.matchDateTimeUTC||"");
-    const ms=Date.parse(iso);
-    const a=m.team1 as Record<string,unknown>|undefined;
-    const b=m.team2 as Record<string,unknown>|undefined;
-    const home=String(a?.teamName||"").trim(),away=String(b?.teamName||"").trim();
-    if(!Number.isInteger(id)||id<1||!Number.isFinite(ms)||!home||!away
-      ||ms<Date.parse(SEASON_START)||ms>=Date.parse(SEASON_END))continue;
-    const done=m.matchIsFinished===true;
-    const results=(Array.isArray(m.matchResults)?m.matchResults:[]) as Record<string,unknown>[];
-    const ft=results.find(x=>Number(x.resultTypeID)===2||
-      String((x.resultInfo as Record<string,unknown>|undefined)?.kind||"")==="After90Minutes");
-    const h=numeric(ft?.pointsTeam1),aw=numeric(ft?.pointsTeam2);
-    const finished=done&&h!==null&&aw!==null;
-    result.push({
-      external_id:"openliga-"+leagueCode+"-"+id,competition_code:leagueCode,
-      kickoff_utc:new Date(ms).toISOString(),home_team:home,away_team:away,
-      status:finished?"FINISHED":"TIMED",home_goals:finished?h:null,away_goals:finished?aw:null,
-      source_name:"OpenLigaDB · 2026/27",
-      source_url:"https://api.openligadb.de/getmatchdata/"+id,
-    });
-  }
-  return result;
-}
+
 async function bulkGerman(db:SqliteDb,leagueCode:string,list:ImportedMatch[]){
   // The 2026/27 full-season snapshot is importable in DB batches, not
   // hundreds of individual transactions. This avoids serverless timeouts.
@@ -179,7 +147,7 @@ async function execute(db:SqliteDb,job:Job):Promise<number>{
   if(job.provider==="OPENLIGA"){
     const league=GERMAN.find(l=>l.code===job.code)!;
     const raw=await jsonFrom("https://api.openligadb.de/getmatchdata/"+league.slug+"/2026");
-    const matches=openLigaMatches(raw,job.code);
+    const matches=parseOpenLigaSeason(raw,job.code);
     if(matches.length===0)throw Error(league.name+" 2026/27 veri kümesi boş");
     return bulkGerman(db,job.code,matches);
   }
