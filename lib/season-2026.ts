@@ -162,10 +162,12 @@ async function plan(db:SqliteDb,onlyLeague?:string):Promise<Job[]>{
       const cursor=Number(row?.cursor_index||0);
       // Recheck finished providers periodically to capture revised scores/kickoff times.
       const previousCheck=Date.parse(String(row?.checked_at||""));
-      const shouldRefresh=cursor>=job.max && (current-previousCheck>24*3600_000);
-      return {...job,cursor:shouldRefresh?0:cursor};
+      const shouldRefresh=cursor>=job.max && (current-previousCheck>14*DAY);
+      const recentFailure=String(row?.state||"")==="FAILED"
+        && Number.isFinite(previousCheck) && current-previousCheck<20*60_000;
+      return {...job,cursor:shouldRefresh?0:cursor,paused:recentFailure};
     })
-    .filter(job=>job.cursor<job.max)
+    .filter(job=>job.cursor<job.max&&!job.paused)
     .sort((a,b)=>{
       // Fill German full-season feeds first, followed by official lower-division fixtures;
       // retain per-league cursor progress to avoid repeating the same matchday.
@@ -185,7 +187,10 @@ async function execute(db:SqliteDb,job:Job):Promise<number>{
     const league=ESPN.find(l=>l.code===job.code)!;
     const start=Date.parse(SEASON_START)+job.cursor*14*DAY;
     const end=Math.min(start+14*DAY-1,Date.parse(SEASON_END)-1);
-    if(start>Date.now()+35*DAY)return 0;
+    if(start>Date.now()+35*DAY){
+      // Officially unpublished future windows remain pending; never mark as fetched.
+      throw Error("Daha ileri tarihli maç programı henüz yayımlanmadı.");
+    }
     const range=dateCompact(start)+"-"+dateCompact(end);
     const matches=await requestEspn(league.feed,range);
     let saved=0;
@@ -227,10 +232,10 @@ export async function runSeasonSyncStep(league="ALL",steps=4){
       const message=error instanceof Error?error.message:String(error);
       await db.run([
         "INSERT INTO season_sync_progress(provider,competition_code,part_key,cursor_index,state,imported,checked_at,error)",
-        "VALUES(?,?,?,?,0,0,?,?)",
+        "VALUES(?,?,?,?,'FAILED',0,?,?)",
         "ON CONFLICT(provider,competition_code,part_key) DO UPDATE SET",
         "state='FAILED',checked_at=excluded.checked_at,error=excluded.error",
-      ].join(" ").replace("VALUES(?,?,?,?,0,0,?,?)","VALUES(?,?,?,?,'FAILED',0,?,?)"),
+      ].join(" "),
       [job.provider,job.code,job.part,job.cursor,new Date().toISOString(),message.slice(0,350)]);
       results.push({provider:job.provider,league:job.code,part:job.part,position:job.cursor+1,
         saved:0,status:"FAILED",error:message});
