@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { conservativeProbability, rankSelections, optimizeCouponPlans, expectedValue } from "../lib/coupon-optimizer.ts";
+import { conservativeProbability, rankSelections, optimizeCouponPlans, expectedValue, kickoffSlot } from "../lib/coupon-optimizer.ts";
 
 const pick=(id, fixture, p, coverage=0.8)=>({
-  id,fixture_id:fixture,market:1.5,selection:"UST",
+  id,fixture_id:fixture,kickoff_utc:"2026-10-28T18:00:00.000Z",market:1.5,selection:"UST",
   probability:p,data_quality:0.9,stats_coverage:coverage,sample_home:5,sample_away:5,
 });
 
@@ -38,4 +38,18 @@ test("expected value requires user-supplied odds",()=>{
   assert.equal(expectedValue(0.6,1),null);
   assert.ok((expectedValue(0.8,1.5)??0)>0);
   assert.ok((expectedValue(0.4,1.5)??0)<0);
+});
+
+test("different kickoff minutes never share a coupon",()=>{
+  const candidate=[1,2,3,4,5].map(id=>pick(id,id,0.99));
+  candidate[4].kickoff_utc="2026-10-28T18:30:00.000Z";
+  const plans=optimizeCouponPlans(candidate);
+  assert.deepEqual(plans.map(p=>p.group.length),[2,3,4]);
+  for(const plan of plans){
+    assert.equal(new Set(plan.group.map(x=>kickoffSlot(x.kickoff_utc))).size,1);
+  }
+});
+test("Turkish-local times must match, regardless of UTC source",()=>{
+  assert.equal(kickoffSlot("2026-10-28T18:00:00Z"), "2026-10-28 21:00");
+  assert.equal(kickoffSlot("2026-10-28T21:00:00+03:00"), "2026-10-28 21:00");
 });
