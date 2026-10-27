@@ -9,6 +9,8 @@ export const LEAGUE_SOURCES = [
   { code:"LL", name:"La Liga", country:"İspanya", feed:"esp.1" },
   { code:"TSL", name:"Süper Lig", country:"Türkiye", feed:"tur.1" },
   { code:"BL", name:"Bundesliga", country:"Almanya", feed:"ger.1" },
+  { code:"BL2", name:"2. Bundesliga", country:"Almanya", feed:"ger.2" },
+  { code:"BL3", name:"3. Liga", country:"Almanya", feed:"ger.3" },
   { code:"SA", name:"Serie A", country:"İtalya", feed:"ita.1" },
 ] as const;
 
@@ -18,7 +20,7 @@ export const TFF_SOURCES = [
   {code:"T3",name:"Nesine 3. Lig",country:"Türkiye",page:971,yearStart:"2026-09-06",maxWeek:34},
 ] as const;
 
-type ImportedMatch = {
+export type ImportedMatch = {
   external_id:string;
   competition_code:string;
   kickoff_utc:string;
@@ -122,7 +124,7 @@ async function requestText(url:string){
   const bytes=await response.arrayBuffer();
   return new TextDecoder("windows-1254").decode(bytes);
 }
-async function requestEspn(league:string,day:string){
+export async function requestEspn(league:string,day:string){
   const url=`https://site.api.espn.com/apis/site/v2/sports/soccer/${league}/scoreboard?dates=${day}&limit=250`;
   const response=await fetch(url,{headers:{Accept:"application/json"},cache:"no-store",signal:AbortSignal.timeout(8_000)});
   if(!response.ok)throw Error(`ESPN HTTP ${response.status}`);
@@ -136,7 +138,7 @@ async function requestEspn(league:string,day:string){
   }));
 }
 
-async function saveFixture(db:SqliteDb,fixture:ImportedMatch) {
+export async function saveFixture(db:SqliteDb,fixture:ImportedMatch) {
   const kickoff=Date.parse(fixture.kickoff_utc);
   if(!Number.isFinite(kickoff)||!canonicalTeam(fixture.home_team)||!canonicalTeam(fixture.away_team)
     ||canonicalTeam(fixture.home_team)===canonicalTeam(fixture.away_team))return "ignored";
