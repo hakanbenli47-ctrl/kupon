@@ -64,10 +64,12 @@ export function parseTffRows(html:string,code:string,sourceUrl:string): Imported
     const anchors=[...row.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)]
       .map(m=>plainHtml(m[1])).filter(Boolean);
     const scorePosition=anchors.findIndex(a=>/^\d{1,2}\s*-\s*\d{1,2}$/.test(a)||a==="-"||a==="–");
-    if(scorePosition<=0||scorePosition>=anchors.length-1)continue;
-    const home=anchors[scorePosition-1],away=anchors[scorePosition+1];
+    const home=scorePosition>0?anchors[scorePosition-1]:anchors[0];
+    const away=scorePosition>0?anchors[scorePosition+1]:anchors[1];
     if(!home||!away||home==="Detaylar"||away==="Detaylar"||canonicalTeam(home)===canonicalTeam(away))continue;
-    const rawScore=anchors[scorePosition].match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+    const scoreLabel=scorePosition>0?anchors[scorePosition]:"";
+    if(scorePosition<0 && !text.includes(`${home} - ${away}`) && !text.includes(`${home} – ${away}`))continue;
+    const rawScore=scoreLabel.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
     const hasScore=Boolean(rawScore);
     const status=hasScore?"FINISHED":"TIMED";
     const external_id=`tff-${code}-${kickoff.slice(0,10)}-${canonicalTeam(home)}-${canonicalTeam(away)}`;
