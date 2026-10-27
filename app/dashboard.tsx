@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { conservativeProbability } from "@/lib/coupon-optimizer";
 
 type Prediction = {
@@ -189,13 +189,14 @@ function couponStatusLabel(status: Coupon["status"]) {
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [league, setLeague] = useState("ALL");
-  const [dateRange, setDateRange] = useState<DateRange>("TODAY");
+  const [dateRange, setDateRange] = useState<DateRange>("NEXT7");
   const [customDate, setCustomDate] = useState(dateKey(new Date()));
   const [analysisFilter, setAnalysisFilter] = useState<AnalysisFilter>("ALL");
   const [teamQuery, setTeamQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [updatingData, setUpdatingData] = useState(false);
   const [updateMessage, setUpdateMessage] = useState("");
+  const autoRefreshAttempted = useRef(false);
   const [error, setError] = useState("");
   const [mainView, setMainView] = useState<MainView>("ANALYSIS");
   const [couponTab, setCouponTab] = useState<CouponTab>("READY");
@@ -257,7 +258,7 @@ export default function Dashboard() {
     return () => window.clearInterval(interval);
   }, [load]);
 
-  const updateRealData = async () => {
+  const updateRealData = useCallback(async () => {
     setUpdatingData(true);
     setUpdateMessage("");
     try {
@@ -270,13 +271,33 @@ export default function Dashboard() {
       await load();
       const added = Number(fixtures.update?.added || 0);
       const closed = Number(scores.updated || 0);
-      setUpdateMessage(`Veriler kontrol edildi · ${added} yeni fikstür · ${closed} tamamlanmış maç güncellendi.`);
+      const sources: Array<{league:string;fetched:number;error?:string}> = fixtures.update?.sources || [];
+      const found = sources.reduce((total, source) => total + Number(source.fetched||0),0);
+      const failures = sources.filter(source=>source.error);
+      setUpdateMessage(
+        fixtures.skipped
+        ? "Fikstür güncellemesi kısa süre önce çalıştırıldı. Mevcut maç listesi yeniden yüklendi."
+        : `Kaynaklarda ${found} maç bulundu · ${added} yeni fikstür · ${closed} final skor. ${failures.length ? "Kaynak uyarısı: "+failures.map(f=>f.league).join(", ") : ""}`
+      );
     } catch(e) {
       setUpdateMessage(e instanceof Error?e.message:"Veri güncellemesi başarısız.");
     } finally {
       setUpdatingData(false);
     }
-  };
+  },[load]);
+
+  useEffect(() => {
+    if(!data || autoRefreshAttempted.current) return;
+    autoRefreshAttempted.current = true;
+    const future = (data.fixtures || []).filter(f => {
+      const kickoff=Date.parse(f.kickoff_utc);
+      return ["TIMED","SCHEDULED","TBC"].includes(f.status)
+        && kickoff > Date.now()
+        && kickoff < Date.now()+7*86_400_000;
+    });
+    // Fresh installation / empty current week: fetch verified sources once automatically.
+    if(future.length===0) void updateRealData();
+  },[data,updateRealData]);
 
   const analyze = async (openCoupons = false) => {
     setBusy(true);
@@ -405,7 +426,7 @@ export default function Dashboard() {
 
   const resetFilters = () => {
     setLeague("ALL");
-    setDateRange("TODAY");
+    setDateRange("NEXT7");
     setCustomDate(today);
     setAnalysisFilter("ALL");
     setTeamQuery("");
@@ -551,7 +572,7 @@ export default function Dashboard() {
           <div className="fixture-list">
             {!data && <div className="empty-state">Panel hazırlanıyor…</div>}
             {data && fixtures.length === 0 && (
-              <div className="empty-state"><strong>Bu filtrelerde maç bulunamadı.</strong><span>Tarih veya lig seçimini değiştirerek tekrar deneyebilirsin.</span></div>
+              <div className="empty-state"><strong>Bu filtrelerde maç bulunamadı.</strong><span>7 gün / Tüm 31 gün seçeneklerini dene. Kaynaklar boşsa "Maç ve Skor Güncelle" ile yeniden kontrol et.</span></div>
             )}
             {fixtures.map((fixture) => {
               const best = bestPrediction(fixture);

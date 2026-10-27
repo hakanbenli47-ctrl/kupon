@@ -8,7 +8,7 @@ export const maxDuration=60;
 
 export async function POST() {
   const db=await getDb();
-  const key=`fixtures-refresh-${Math.floor(Date.now()/3600000)}`;
+  const key=`fixtures-refresh-v3-${Math.floor(Date.now()/3600000)}`;
   const lock=await db.run(
     "INSERT OR IGNORE INTO cloud_sync_locks(run_key,started_at,status) VALUES (?,?, 'RUNNING')",
     [key,new Date().toISOString()]
@@ -31,8 +31,15 @@ export async function POST() {
     }
   }
   try{
-    const update=await importLeagueFixtures(12);
-    const analysis=await runAnalysis(2);
+    const update=await importLeagueFixtures(24);
+    const sourcesChecked=update.sources.filter(source=>source.fetched>0);
+    if(sourcesChecked.length===0) {
+      const details=update.sources.map(source=>
+        source.error ? `${source.league}: ${source.error}` : `${source.league}: veri bulunamadı`
+      ).slice(0,8).join(" · ");
+      throw new Error(`Fikstür sağlayıcılarından maç alınamadı. ${details}`);
+    }
+    const analysis=await runAnalysis(3);
     await db.run("UPDATE cloud_sync_locks SET finished_at=?,status='SUCCESS',notes=? WHERE run_key=?",
       [new Date().toISOString(),JSON.stringify({update,analysis}).slice(0,3500),key]);
     return Response.json({ok:true,update,analysis},{

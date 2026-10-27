@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   conservativeProbability, expectedValue, rankSelections, kickoffSlot,
@@ -31,9 +31,13 @@ type MarketChoice = "TUMU" | "ALT" | "UST";
 
 const pct = (p: number) => "%"+(p * 100).toFixed(1).replace(".", ",");
 const dec = (v: number) => v.toFixed(2).replace(".", ",");
-const day = (s: string | Date) => new Intl.DateTimeFormat("en-CA", {
-  timeZone: "Europe/Istanbul", year: "numeric", month: "2-digit", day: "2-digit",
-}).format(new Date(s));
+const day = (s: string | Date) => {
+  const parts=new Intl.DateTimeFormat("en-CA", {
+    timeZone:"Europe/Istanbul",year:"numeric",month:"2-digit",day:"2-digit",
+  }).formatToParts(new Date(s));
+  const field=(type:string)=>parts.find(p=>p.type===type)?.value||"";
+  return `${field("year")}-${field("month")}-${field("day")}`;
+};
 const tomorrow = () => day(new Date(Date.now() + 86_400_000));
 const formatTime = (s: string) => new Intl.DateTimeFormat("tr-TR",{
   timeZone:"Europe/Istanbul", hour:"2-digit", minute:"2-digit",
@@ -67,7 +71,8 @@ function simulate(probabilities: number[], count = 10000) {
 export default function SmartCouponsPage() {
   const [data,setData] = useState<Data|null>(null);
   const [error,setError] = useState("");
-  const [date,setDate] = useState(tomorrow);
+  const [date,setDate] = useState("");
+  const attemptedFirstImport=useRef(false);
   const [count,setCount] = useState(5);
   const [quality,setQuality] = useState(0.65);
   const [choice,setChoice] = useState<MarketChoice>("TUMU");
@@ -106,13 +111,22 @@ export default function SmartCouponsPage() {
     finally{setRefreshing(false);setRefresh(x=>x+1);}
   }
 
-  const fixtures = useMemo(() => (data?.fixtures ?? []).filter(f=>
-    day(f.kickoff_utc)===date &&
-    (league === "ALL" || f.competition_code === league) &&
-    ["SCHEDULED","TIMED"].includes(f.status) &&
-    new Date(f.kickoff_utc).getTime() > Date.now()
-  ),[data,date,league]);
-  const selectionMap = useMemo(() => new Map(fixtures.map(f=>[f.id,f])),[fixtures]);
+  const upcomingDays=useMemo(() =>
+    [...new Set((data?.fixtures??[]).filter(f=>
+      ["SCHEDULED","TIMED","TBC"].includes(f.status)
+      && Date.parse(f.kickoff_utc)>Date.now()
+      && (league==="ALL"||f.competition_code===league)
+    ).map(f=>day(f.kickoff_utc)))].sort().slice(0,31),
+  [data,league]);
+  const effectiveDate = date || upcomingDays[0] || tomorrow();
+  const dailyFixtures=useMemo(()=>(data?.fixtures??[]).filter(f=>
+    day(f.kickoff_utc)===effectiveDate &&
+    (league==="ALL"||f.competition_code===league) &&
+    ["SCHEDULED","TIMED","TBC"].includes(f.status) &&
+    Date.parse(f.kickoff_utc)>Date.now()
+  ),[data,effectiveDate,league]);
+  const fixtures = dailyFixtures.filter(f=>f.status!=="TBC");
+  const selectionMap = useMemo(() => new Map(fixtures.map(f=>[f.id,f])),[dailyFixtures]);
   const available = useMemo(() => fixtures.flatMap(f=>
     f.predictions.filter(p=>choice==="TUMU"||p.selection===choice)
       .map(p=>({...p, fixture_id:f.id, kickoff_utc:f.kickoff_utc}))
@@ -154,6 +168,33 @@ export default function SmartCouponsPage() {
     ? (Date.now()-new Date(data.lastSync.finished_at).getTime())/3600000 : Infinity;
   const stale = data!==null && (sourceAge>72 || data.lastSync?.status==="FAILED");
 
+  useEffect(()=>{
+    if(!data||attemptedFirstImport.current)return;
+    attemptedFirstImport.current=true;
+    const upcoming=(data.fixtures??[]).filter(f=>{
+      const ms=Date.parse(f.kickoff_utc);
+      return ["TIMED","SCHEDULED","TBC"].includes(f.status)
+        && ms>Date.now() && ms<Date.now()+7*86_400_000;
+    });
+    if(upcoming.length>0)return;
+    void (async()=>{
+      setRefreshing(true);
+      setRefreshMessage("Güncel maç fikstürü otomatik kontrol ediliyor…");
+      try{
+        const response=await fetch("/api/refresh-fixtures",{method:"POST",cache:"no-store"});
+        const payload=await response.json() as {ok?:boolean;error?:string;update?:{added?:number;sources?:Array<{league:string;fetched:number;error?:string}>};skipped?:boolean};
+        if(!response.ok||!payload.ok)throw Error(payload.error||"Fikstür kaynağına ulaşılamadı.");
+        const sourceCount=(payload.update?.sources??[]).reduce((n,s)=>n+(s.fetched||0),0);
+        setRefreshMessage(payload.skipped
+          ? "Kaynaklar daha önce kontrol edilmiş. Listede maç yoksa filtreleri genişlet."
+          : `Fikstür kaynaklarında ${sourceCount} maç bulundu, ${payload.update?.added??0} yeni kayıt eklendi.`);
+        setRefresh(value=>value+1);
+      }catch(error){
+        setRefreshMessage(error instanceof Error ? error.message : "Otomatik fikstür yenileme başarısız.");
+      }finally{setRefreshing(false);}
+    })();
+  },[data]);
+
   return <main className="mx-auto max-w-6xl px-4 py-7 md:px-8 text-[#12251a]">
     <header className="mb-9 flex flex-wrap items-center justify-between gap-4">
       <div>
@@ -174,7 +215,7 @@ export default function SmartCouponsPage() {
     </p>}
     <section className="mb-6 grid gap-4 rounded-2xl border border-[#dce2dc] bg-white p-5 md:grid-cols-3 xl:grid-cols-6" aria-label="Analiz tercihleri">
       <label className="grid gap-2 text-sm font-semibold">Maç tarihi
-        <input type="date" value={date} min={day(new Date())} onChange={e=>{setDate(e.target.value);setKickoffTime("AUTO");}}
+        <input type="date" value={effectiveDate} min={day(new Date())} onChange={e=>{setDate(e.target.value);setKickoffTime("AUTO");}}
           className="w-full rounded-lg border border-[#c8d6ce] p-3"/>
       </label>
       <label className="grid gap-2 text-sm font-semibold">Kupondaki maç sayısı
@@ -184,7 +225,7 @@ export default function SmartCouponsPage() {
         </select>
       </label>
       <label className="grid gap-2 text-sm font-semibold">Lig seçimi
-        <select value={league} onChange={e=>{setLeague(e.target.value);setKickoffTime("AUTO");}}
+        <select value={league} onChange={e=>{setLeague(e.target.value);setDate("");setKickoffTime("AUTO");}}
           className="rounded-lg border border-[#c8d6ce] p-3">
           {[
             ["ALL","Tüm ligler"],["TSL","Türkiye Süper Lig"],["T1","Türkiye 1. Lig"],
@@ -217,8 +258,8 @@ export default function SmartCouponsPage() {
     </section>
     <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-4">
       {[
-        ["O günkü maç",String(fixtures.length)],
-        ["Analizi bulunan",String(fixtures.filter(f=>f.predictions.length>0).length)],
+        ["O günkü maç",String(dailyFixtures.length)],
+        ["Analizi bulunan",String(dailyFixtures.filter(f=>f.predictions.length>0).length)],
         ["Filtreyi geçen",String(ranked.length)],
         ["Son güncelleme",data?.lastSync?.finished_at?new Date(data.lastSync.finished_at).toLocaleString("tr-TR",{timeZone:"Europe/Istanbul"}):"Bekleniyor"],
       ].map(([label,value])=><div key={label} className="rounded-xl border border-[#dce2dc] bg-white p-4">
@@ -226,6 +267,38 @@ export default function SmartCouponsPage() {
         <div className="mt-2 text-lg font-bold">{value}</div>
       </div>)}
     </div>
+
+    <section className="mb-6 rounded-2xl border border-[#dce2dc] bg-white p-5">
+      <div className="mb-4">
+        <h2 className="text-xl font-bold">Maç fikstürü · {effectiveDate}</h2>
+        <p className="mt-1 text-sm text-[#566a5a]">Tahmini hazır olmasa bile doğrulanmış bütün maçları listeler. Kupon için sadece aynı gün ve aynı saatte başlayan, veri kalitesi yeterli maçlar seçilir.</p>
+      </div>
+      <div className="mb-4 flex flex-wrap gap-2">
+        {upcomingDays.slice(0,14).map(key=><button type="button" key={key}
+          onClick={()=>{setDate(key);setKickoffTime("AUTO");}}
+          className={`rounded-lg border px-3 py-2 text-sm ${effectiveDate===key?"border-[#176b45] bg-[#e2efe5] font-bold":"border-[#dce2dc]"}`}>
+          {key}{effectiveDate===key?" · Seçili":""}
+        </button>)}
+      </div>
+      {!data && !error && <p role="status" className="py-3">Fikstür yükleniyor…</p>}
+      {data && dailyFixtures.length===0 && <p className="rounded-xl bg-[#f0f3ed] p-4 text-sm">
+        {upcomingDays.length
+          ? "Bu tarihte maç bulunamadı. Yukarıdaki maç bulunan günlerden birini seç."
+          : "Önümüzdeki 31 gün için doğrulanmış maç verisi henüz yok. Kaynakları yeniden güncelle; son denetim mesajını kontrol et."}
+      </p>}
+      <div className="divide-y divide-[#e7ece7]">
+        {dailyFixtures.slice(0,showAll?200:40).map(f=><div key={f.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+          <div>
+            <strong className="text-sm">{f.home_team} – {f.away_team}</strong>
+            <div className="mt-1 text-xs text-[#566a5a]">{f.competition}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-sm font-semibold">{f.status==="TBC"?"Saat onaylanmadı":formatTime(f.kickoff_utc)}</div>
+            <div className="text-xs text-[#566a5a]">{f.predictions.length?"Analiz mevcut":"Analiz için veri bekleniyor"}</div>
+          </div>
+        </div>)}
+      </div>
+    </section>
 
     <div className="grid gap-6 lg:grid-cols-[1.55fr_1fr]">
       <section className="rounded-2xl border border-[#dce2dc] bg-white p-5">

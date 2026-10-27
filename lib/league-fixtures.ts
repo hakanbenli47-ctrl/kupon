@@ -60,6 +60,30 @@ export function parseTffRows(html:string,code:string,sourceUrl:string): Imported
   const rows=html.match(/<tr\b[^>]*>[\s\S]*?<\/tr>/gi)||[];
   const unique=new Map<string,ImportedMatch>();
   for(const row of rows){
+    // Official TFF weekly fixtures use labelled spans rather than anchor-based score rows.
+    const officialDate=row.match(/lblTarih["'][^>]*>([^<]*)<\/span>/i)?.[1];
+    const officialTime=row.match(/lblSaat["'][^>]*>([^<]*)<\/span>/i)?.[1];
+    const officialHome=row.match(/Label4["'][^>]*>([^<]+)<\/span>/i)?.[1];
+    const officialAway=row.match(/Label1["'][^>]*>([^<]+)<\/span>/i)?.[1];
+    const officialId=row.match(/[?&]macId=(\d+)/i)?.[1];
+    if(officialDate && officialTime && officialHome && officialAway && officialId){
+      const dateParts=decodeHtml(officialDate).trim().match(/^(\d{2})\.(\d{2})\.(20\d{2})$/);
+      const timeParts=decodeHtml(officialTime).trim().match(/^(\d{2}):(\d{2})$/);
+      if(dateParts && timeParts){
+        const kickoff=trDateUtc(dateParts[1],dateParts[2],dateParts[3],timeParts[1],timeParts[2]);
+        const home=plainHtml(officialHome),away=plainHtml(officialAway);
+        if(kickoff && home && away && canonicalTeam(home)!==canonicalTeam(away)){
+          const external_id=`tff-${code}-${officialId}`;
+          unique.set(external_id,{
+            external_id,competition_code:code,kickoff_utc:kickoff,
+            home_team:home,away_team:away,status:"TIMED",
+            home_goals:null,away_goals:null,source_name:"TFF Resmî Fikstür",
+            source_url:`https://www.tff.org/Default.aspx?pageID=29&macId=${officialId}`,
+          });
+          continue;
+        }
+      }
+    }
     const text=plainHtml(row);
     const date=text.match(/\b(\d{2})\.(\d{2})\.(20\d{2})\s+(\d{2}):(\d{2})\b/);
     if(!date)continue;
@@ -197,9 +221,31 @@ export async function importLeagueFixtures(maxPerLeague = 24) {
     try {
       const start=new Date(maxPast).toISOString().slice(0,10).replace(/-/g,"");
       const end=new Date(maxFuture).toISOString().slice(0,10).replace(/-/g,"");
-      matches=(await requestEspn(league.feed,`${start}-${end}`))
-        .map(f=>({...f,competition_code:league.code}));
-      sources.push({league:league.name,fetched:matches.length});
+      let rangedError="";
+      try {
+        matches=(await requestEspn(league.feed,`${start}-${end}`))
+          .map(f=>({...f,competition_code:league.code}));
+      } catch(error) {
+        rangedError=error instanceof Error?error.message:String(error);
+      }
+      // Some ESPN competitions reject large date-range requests outright.
+      // A small direct-date fallback prevents showing an empty site on those days.
+      if(matches.length===0){
+        const dates=[0,1,2,3,4,5,6,7,8,9,10,11,12,13].map(n=>
+          new Date(Date.now()+n*86_400_000).toISOString().slice(0,10).replace(/-/g,"")
+        );
+        const snapshots=await Promise.allSettled(dates.map(date=>requestEspn(league.feed,date)));
+        matches=[...new Map(snapshots.flatMap(s=>
+          s.status==="fulfilled"?s.value.map(f=>[f.external_id,{...f,competition_code:league.code}] as const):[]
+        )).values()];
+        if(matches.length===0 && rangedError){
+          sources.push({league:league.name,fetched:0,error:rangedError});
+        }else {
+          sources.push({league:league.name,fetched:matches.length});
+        }
+      }else {
+        sources.push({league:league.name,fetched:matches.length});
+      }
     }catch(error){
       sources.push({league:league.name,fetched:0,error:error instanceof Error?error.message:String(error)});
     }
