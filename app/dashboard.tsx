@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { conservativeProbability } from "@/lib/coupon-optimizer";
 
 type Prediction = {
   id: number;
@@ -43,6 +44,10 @@ type Coupon = {
     market: number;
     selection: "ALT" | "UST";
     probability: number;
+    data_quality: number;
+    stats_coverage: number;
+    sample_home: number;
+    sample_away: number;
     kickoff_utc: string;
     home_team: string;
     away_team: string;
@@ -287,8 +292,8 @@ export default function Dashboard() {
     return coupon.status === "ACTIVE" && coupon.generated_for === today;
   }).sort((left, right) => {
     if (couponTab !== "READY") return 0;
-    const leftAlternative = left.label.startsWith("Alternatif") ? 1 : 0;
-    const rightAlternative = right.label.startsWith("Alternatif") ? 1 : 0;
+    const leftAlternative = left.risk === "YUKSEK" ? 1 : 0;
+    const rightAlternative = right.risk === "YUKSEK" ? 1 : 0;
     if (leftAlternative !== rightAlternative) return leftAlternative - rightAlternative;
     return Number(left.label.match(/\d+/)?.[0] || 0) - Number(right.label.match(/\d+/)?.[0] || 0);
   }), [couponTab, data, selectedCouponIds, today]);
@@ -392,6 +397,7 @@ export default function Dashboard() {
           >
             Kupon Robotu
           </button>
+          <a href="/akilli-kupon" className="smart-tab">Akıllı Laboratuvar</a>
         </nav>
         <div className="top-actions">
           <span className="sync-dot" aria-hidden="true" />
@@ -561,7 +567,7 @@ export default function Dashboard() {
             <div>
               <p className="eyebrow">BUGÜNÜN SEÇİM MERKEZİ</p>
               <h1>Kupon Robotu</h1>
-              <p>Analizi hazır bütün maçlar 4–5 maçlık Banko ve Alternatif kuponlara dağıtılır. Maç sonuçları otomatik kontrol edilir; istersen skorları elle de girebilirsin.</p>
+              <p>Kalite eşiğini geçen maçlarla 2–6 seçimli risk odaklı kuponlar hazırlanır. Yetersiz veride kupon üretilmez; hiçbir seçim garanti değildir.</p>
             </div>
             <dl>
               <div><dt>Analizi hazır</dt><dd>{todayReadyFixtures.length}</dd></div>
@@ -585,10 +591,10 @@ export default function Dashboard() {
           </div>
           <div className="coupon-card-grid">
           {!coupons.length && (
-            <div className="coupon-empty"><span className="coupon-number">0</span><strong>Bu bölümde kupon yok</strong><p>Bugün en az dört analiz hazır olduğunda robot 4–5 maçlık grupları oluşturur.</p></div>
+            <div className="coupon-empty"><span className="coupon-number">0</span><strong>Bu bölümde kupon yok</strong><p>Yeterli istatistikli maç yoksa otomatik kupon önerilmez. Yarın ve oran analizi için Akıllı Laboratuvar ekranına geçebilirsin.</p></div>
           )}
           {coupons.map((coupon) => (
-            <article className={`coupon-card status-${coupon.status.toLowerCase()} category-${coupon.label.startsWith("Alternatif") ? "alternative" : "banko"}`} key={coupon.id}>
+            <article className={`coupon-card status-${coupon.status.toLowerCase()} category-${coupon.risk === "YUKSEK" ? "alternative" : "banko"}`} key={coupon.id}>
               <div className="coupon-head">
                 <div><span>{coupon.generated_for} · {couponStatusLabel(coupon.status)}{coupon.manually_reviewed ? " · Manuel kayıt" : ""}</span><strong>{coupon.label}</strong></div>
                 <b>{coupon.status === "WON" ? "✓" : coupon.status === "LOST" ? "×" : percentage(coupon.combined_probability)}</b>
@@ -607,7 +613,7 @@ export default function Dashboard() {
                         {pick.home_goals !== null && pick.away_goals !== null ? ` · ${pick.home_goals}-${pick.away_goals}` : ""}
                       </span>
                       {prediction && (
-                        <span>Beklenen {prediction.expected_total.toFixed(2)} gol · Veri kalitesi {percentage(prediction.data_quality)}</span>
+                        <span>Beklenen {prediction.expected_total.toFixed(2)} gol · Veri kalitesi {percentage(prediction.data_quality)} · Temkinli seçim {percentage(conservativeProbability(pick.probability, pick.data_quality, pick.stats_coverage, pick.sample_home, pick.sample_away))}</span>
                       )}
                     </div>
                     <b className={pick.outcome ? `pick-${pick.outcome.toLowerCase()}` : ""}>
@@ -618,7 +624,7 @@ export default function Dashboard() {
                 })}
               </ol>
               <div className="coupon-foot">
-                <span>Birleşik olasılık <strong>{percentage(coupon.combined_probability)}</strong></span>
+                <span>Temkinli birleşik olasılık <strong>{percentage(coupon.combined_probability)}</strong> · Risk: {coupon.risk === "DUSUK" ? "Düşük" : coupon.risk === "ORTA" ? "Orta" : "Yüksek"}</span>
                 <button type="button" onClick={() => toggleCoupon(coupon.id)}>
                   {selectedCouponIds.includes(coupon.id) ? "Seçimi kaldır" : "Kuponu seç"}
                 </button>
@@ -673,7 +679,7 @@ export default function Dashboard() {
         </aside>
       </section>
 
-      <footer><span>Olasılık tahmindir, garanti değildir. Banko ve Alternatif kuponlar güven düzeyine göre ayrı gösterilir.</span><span>Model: goal-poisson-2.1-timing</span></footer>
+      <footer><span>Olasılık tahmindir, garanti değildir. Veri yetersizse kupon üretilmez; bahis oranı olmadan beklenen kâr hesaplanamaz.</span><span>Model: goal-poisson-2.2-conservative</span></footer>
     </main>
   );
 }

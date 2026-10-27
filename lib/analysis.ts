@@ -2,8 +2,9 @@ import "server-only";
 
 import { getDb, SqliteDb, withTransaction } from "./db";
 import { ensureSeedData } from "./seed";
+import { optimizeCouponPlans, type CouponCandidate } from "./coupon-optimizer";
 
-const MODEL_VERSION = "goal-poisson-2.1-timing";
+const MODEL_VERSION = "goal-poisson-2.2-conservative";
 const MARKETS = [1.5, 2.5, 3.5] as const;
 
 type MatchRow = {
@@ -514,60 +515,19 @@ async function settleCoupons(db: SqliteDb) {
 }
 
 async function buildCoupons(db: SqliteDb, generatedFor: string) {
-  const candidates = await db.all(`
-    SELECT p.id, p.fixture_id, p.probability, p.data_quality, p.stats_coverage, f.kickoff_utc
+  const rows = await db.all(`
+    SELECT p.id, p.fixture_id, p.market, p.selection,
+           p.probability, p.data_quality, p.stats_coverage, p.sample_home, p.sample_away
     FROM predictions p JOIN fixtures f ON f.id = p.fixture_id
-    WHERE p.is_active = 1 AND p.outcome IS NULL AND f.status IN ('SCHEDULED','TIMED','TBC')
+    WHERE p.is_active = 1 AND p.outcome IS NULL AND f.status IN ('SCHEDULED','TIMED')
+      AND datetime(f.kickoff_utc) > datetime('now')
       AND date(datetime(f.kickoff_utc, '+3 hours')) = date(?)
-    ORDER BY (p.probability * 0.65 + p.data_quality * 0.25 + p.stats_coverage * 0.10) DESC
-  `, [generatedFor]) as unknown as Array<{
-    id: number;
-    fixture_id: number;
-    probability: number;
-    data_quality: number;
-    stats_coverage: number;
-  }>;
+  `, [generatedFor]) as unknown as CouponCandidate[];
 
-  const unique: typeof candidates = [];
-  const seen = new Set<number>();
-  for (const candidate of candidates) {
-    if (!seen.has(candidate.fixture_id)) {
-      unique.push(candidate);
-      seen.add(candidate.fixture_id);
-    }
-  }
-
-  const groups: typeof candidates[] = [];
-  if (unique.length >= 4) {
-    const groupCount = Math.ceil(unique.length / 5);
-    const baseSize = Math.floor(unique.length / groupCount);
-    const largerGroups = unique.length % groupCount;
-    let cursor = 0;
-    for (let index = 0; index < groupCount; index += 1) {
-      const size = baseSize + (index < largerGroups ? 1 : 0);
-      const group = unique.slice(cursor, cursor + size);
-      for (const filler of unique) {
-        if (group.length >= 4) break;
-        if (!group.some((pick) => pick.fixture_id === filler.fixture_id)) group.push(filler);
-      }
-      groups.push(group);
-      cursor += size;
-    }
-  }
-
-  let bankoIndex = 0;
-  let alternativeIndex = 0;
-  const desiredGroups = groups.map((group) => {
-    const isBanko = group.every((pick) => pick.probability >= 0.78 && pick.data_quality >= 0.75);
-    const label = isBanko
-      ? `Banko ${bankoIndex += 1}`
-      : `Alternatif ${alternativeIndex += 1}`;
-    return { group, label };
-  });
+  const desired = optimizeCouponPlans(rows);
   const existingRows = await db.all(`
     SELECT c.id, c.label, cs.prediction_id
-    FROM coupons c
-    JOIN coupon_selections cs ON cs.coupon_id = c.id
+    FROM coupons c JOIN coupon_selections cs ON cs.coupon_id = c.id
     WHERE c.generated_for = ? AND c.status = 'ACTIVE'
     ORDER BY c.id, cs.position
   `, [generatedFor]) as unknown as Array<{ id: number; label: string; prediction_id: number }>;
@@ -577,34 +537,35 @@ async function buildCoupons(db: SqliteDb, generatedFor: string) {
     item.predictionIds.push(Number(row.prediction_id));
     existingByLabel.set(row.label, item);
   }
-
   let created = 0;
-  for (const { group, label } of desiredGroups) {
-    const existing = existingByLabel.get(label);
-    const nextIds = group.map((pick) => Number(pick.id));
-    const unchanged = existing
-      && existing.predictionIds.length === nextIds.length
-      && existing.predictionIds.every((id, position) => id === nextIds[position]);
-    if (unchanged) continue;
-    if (existing) {
-      await db.run("UPDATE coupons SET status = 'SUPERSEDED' WHERE id = ?", [existing.id]);
+  for (const plan of desired) {
+    const existing = existingByLabel.get(plan.label);
+    const predictionIds = plan.group.map((p) => p.id);
+    if (existing?.predictionIds.length === predictionIds.length &&
+        existing.predictionIds.every((id, position) => id === predictionIds[position])) {
+      // Recompute the risk even when the underlying selection IDs stayed unchanged.
+      await db.run(
+        "UPDATE coupons SET combined_probability = ?, risk = ? WHERE id = ?",
+        [plan.combinedProbability, plan.risk, existing.id],
+      );
+      continue;
     }
-    const combined = group.reduce((value, pick) => value * pick.probability, 1);
-    const risk = combined >= 0.35 ? "DUSUK" : combined >= 0.2 ? "ORTA" : "YUKSEK";
+    if (existing) await db.run("UPDATE coupons SET status = 'SUPERSEDED' WHERE id = ?", [existing.id]);
     const result = await db.run(`
       INSERT INTO coupons(generated_for, label, combined_probability, risk, status)
       VALUES (?, ?, ?, ?, 'ACTIVE')
-    `, [generatedFor, label, combined, risk]);
+    `, [generatedFor, plan.label, plan.combinedProbability, plan.risk]);
     const couponId = Number(result.lastInsertRowid);
-    await Promise.all(group.map((pick, position) => db.run(
-      "INSERT INTO coupon_selections(coupon_id, prediction_id, position) VALUES (?, ?, ?)",
-      [couponId, pick.id, position + 1],
-    )));
+    for (const [index, pick] of plan.group.entries()) {
+      await db.run(
+        "INSERT INTO coupon_selections(coupon_id, prediction_id, position) VALUES (?, ?, ?)",
+        [couponId, pick.id, index + 1],
+      );
+    }
     created += 1;
   }
-
   for (const [label, existing] of existingByLabel) {
-    if (!desiredGroups.some((candidate) => candidate.label === label)) {
+    if (!desired.some((plan) => plan.label === label)) {
       await db.run("UPDATE coupons SET status = 'SUPERSEDED' WHERE id = ?", [existing.id]);
     }
   }
@@ -720,7 +681,7 @@ export async function getDashboard(days = 15) {
            COALESCE(mcr.status, c.status) AS status,
            CASE WHEN mcr.coupon_id IS NULL THEN 0 ELSE 1 END AS manually_reviewed,
            c.created_at,
-           cs.position, p.market, p.selection, p.probability, p.outcome,
+           cs.position, p.market, p.selection, p.probability, p.data_quality, p.stats_coverage, p.sample_home, p.sample_away, p.outcome,
            f.id AS fixture_id, f.kickoff_utc, ht.name AS home_team, at.name AS away_team,
            f.status AS fixture_status, f.home_goals, f.away_goals,
            comp.code AS competition_code, comp.name AS competition
@@ -755,6 +716,10 @@ export async function getDashboard(days = 15) {
       market: row.market,
       selection: row.selection,
       probability: row.probability,
+      data_quality: row.data_quality,
+      stats_coverage: row.stats_coverage,
+      sample_home: row.sample_home,
+      sample_away: row.sample_away,
       kickoff_utc: row.kickoff_utc,
       home_team: row.home_team,
       away_team: row.away_team,
