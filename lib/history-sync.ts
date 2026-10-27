@@ -8,10 +8,10 @@ type Goal = { side:"home"|"away"; minute:number; player:string|null; ownGoal:boo
 type Job = {provider:"ESPN"|"OPENLIGA"|"TFF";league:string;season:string;source:string};
 const jobs:Job[] = [
   ...LEAGUE_SOURCES.filter(x=>!["BL","BL2","BL3"].includes(x.code))
-    .map(x=>({provider:"ESPN" as const,league:x.code,season:"2026",source:x.feed})),
+    .map(x=>({provider:"ESPN" as const,league:x.code,season:"2026-v4",source:x.feed})),
   ...[{league:"BL",source:"bl1"},{league:"BL2",source:"bl2"},{league:"BL3",source:"bl3"}]
     .map(x=>({provider:"OPENLIGA" as const,league:x.league,season:"2026",source:x.source})),
-  ...TFF_SOURCES.map(x=>({provider:"TFF" as const,league:x.code,season:"2026",source:String(x.page)})),
+  ...TFF_SOURCES.map(x=>({provider:"TFF" as const,league:x.code,season:"2026-v4",source:String(x.page)})),
 ];
 
 function validScore(v:unknown):number|null {
@@ -111,16 +111,19 @@ async function importBatch(job:Job,index:number,limit:number,db:SqliteDb){
     fixtures=sorted.slice(index*limit,(index+1)*limit);
     more=(index+1)*limit<sorted.length;
   } else if(job.provider==="ESPN"){
-    const start=Date.parse("2026-08-01T00:00:00Z")+index*14*86_400_000;
-    const end=Math.min(start+14*86_400_000-1,Date.now());
-    if(start>=Date.now())return {more:false,stored:0,goalsSaved:0,scanned:0};
+    // Read newest completed league rounds first. Analysis needs recent form.
+    const base=Date.parse("2026-08-01T00:00:00Z"),step=14*86_400_000;
+    const latest=Math.max(0,Math.floor((Date.now()-base)/step));
+    const start=base+(latest-index)*step;
+    const end=Math.min(start+step-1,Date.now());
+    if(start<base || start>=Date.now())return {more:false,stored:0,goalsSaved:0,scanned:0};
     const since=new Date(start).toISOString().slice(0,10).replace(/-/g,"");
     const until=new Date(end).toISOString().slice(0,10).replace(/-/g,"");
     const list=await requestEspn(job.source,since+"-"+until);
     const finished=list.filter(f=>f.status==="FINISHED"&&f.home_goals!==null&&f.away_goals!==null);
     if(finished.length>limit)throw Error("Too many historic fixtures in time window; reduce interval size");
     fixtures=finished.map(f=>({fixture:{...f,competition_code:job.league},goals:[]}));
-    more=start+14*86_400_000<Date.now();
+    more=start-14*86_400_000>=base;
   } else {
     const src=TFF_SOURCES.find(x=>x.code===job.league);
     if(!src)return {more:false,stored:0,goalsSaved:0,scanned:0};
@@ -134,10 +137,12 @@ async function importBatch(job:Job,index:number,limit:number,db:SqliteDb){
       const group=href.match(/grupID=(\d+)/i)?.[1];
       if(group)groups.add(group);
     }
-    const ids=[...groups];
+    const ids=[...groups].sort();
     const groupCount=Math.max(1,ids.length);
-    const week=Math.floor(index/groupCount)+1;
-    if(week>src.maxWeek)return {more:false,stored:0,goalsSaved:0,scanned:0};
+    const first=Date.parse(src.yearStart+"T00:00:00Z");
+    const currentWeek=Math.max(1,Math.min(src.maxWeek,Math.floor((Date.now()-first)/(7*86_400_000))+1));
+    const week=currentWeek-Math.floor(index/groupCount);
+    if(week<1)return {more:false,stored:0,goalsSaved:0,scanned:0};
     const selectedGroup=ids.length?ids[index % groupCount]:null;
     const urls=[base+(selectedGroup?"&grupID="+selectedGroup:"")+"&hafta="+week];
     const pages=await Promise.allSettled(urls.map(snapshotText));
@@ -150,7 +155,7 @@ async function importBatch(job:Job,index:number,limit:number,db:SqliteDb){
     }
     if(found.size>limit)throw Error("TFF weekly results exceed batch capacity");
     fixtures=[...found.values()].map(f=>({fixture:f,goals:[]}));
-    more=index+1<src.maxWeek*groupCount;
+    more=index+1<currentWeek*groupCount;
   }
   let stored=0,goalsSaved=0;
   for(const item of fixtures){

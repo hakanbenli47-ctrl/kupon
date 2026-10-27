@@ -1,479 +1,385 @@
 "use client";
-
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import {
-  conservativeProbability, expectedValue, rankSelections, kickoffSlot,
-  type CouponCandidate, type RankedCandidate,
-} from "@/lib/coupon-optimizer";
 
-type Prediction = CouponCandidate & {
-  expected_total: number;
-  explanation_json: string;
+type MarketName="1"|"X"|"2"|"1X"|"X2"|"12"|"O1.5"|"U1.5"|"O2.5"|"U2.5"|"O3.5"|"U3.5"|"BTTS_Y"|"BTTS_N";
+type Projection={name:MarketName;probability:number;conservative:number};
+type Game={
+ fixture:{id:number;competition:string;kickoff:string;homeId:number;awayId:number;homeName:string;awayName:string;source:string;sourceCheckedAt:string};
+ sameTimeSlot:string|null;
+ profile:{status:"READY"|"INSUFFICIENT";reason?:string;lambdaHome?:number;lambdaAway?:number;quality?:number;
+ samples?:{home:number;away:number;homeVenue:number;awayVenue:number;league:number;xg:number};
+ sources?:{scores:boolean;xg:boolean;goalMinutes:boolean};
+ markets?:Projection[];scores?:Array<{score:string;probability:number}>;modelVersion:string};
+ simulations?:{iterations:number;scores:Array<{score:string;count:number}>;markets:Record<string,number>}|null;
 };
-type Fixture = {
-  id: number;
-  status: string;
-  kickoff_utc: string;
-  source_checked_at: string;
-  competition: string;
-  competition_code: string;
-  home_team: string;
-  away_team: string;
-  home_team_id: number;
-  away_team_id: number;
-  predictions: Prediction[];
+type Data={modelVersion:string;generatedAt:string;fixtures:Game[];
+ coverage:Array<{competition:string;played:number;ready:number;waiting:number;xgMatches:number}>};
+type TestData={total:number;totalBrier:number|null;baselineBrier:number|null;totalLogLoss:number|null;totalOver25Brier:number|null;winnerAccuracy:number|null;baselineAccuracy:number|null;over25Accuracy:number|null;leagues:Array<{
+ competition:string;count:number;brier:number;baselineBrier:number;logLoss:number;over25Brier:number;winnerAccuracy:number;baselineAccuracy:number;over25Accuracy:number;validated:boolean;beatsNaiveBaseline:boolean
+}>};
+const names:Record<string,string>={
+ TSL:"Türkiye Süper Lig",T1:"Türkiye 1. Lig",T2:"Türkiye 2. Lig",T3:"Türkiye 3. Lig",
+ BL:"Bundesliga",BL2:"2. Bundesliga",BL3:"3. Liga",PL:"Premier Lig",LL:"La Liga",
+ SA:"Serie A",CL:"Şampiyonlar Ligi",EL:"Avrupa Ligi",ECL:"Konferans Ligi",
 };
-type Data = {
-  generatedAt: string;
-  fixtures: Fixture[];
-  lastSync: null | {finished_at?: string; status?: string};
+const markets:MarketName[]=["O1.5","U1.5","O2.5","U2.5","O3.5","U3.5","1X","X2","12","1","X","2","BTTS_Y","BTTS_N"];
+const label=(key:MarketName)=>({
+ "O1.5":"1,5 Üst","U1.5":"1,5 Alt","O2.5":"2,5 Üst","U2.5":"2,5 Alt",
+ "O3.5":"3,5 Üst","U3.5":"3,5 Alt","1":"MS 1","X":"MS X","2":"MS 2",
+ "1X":"1X","X2":"X2","12":"12","BTTS_Y":"KG Var","BTTS_N":"KG Yok",
+} as Record<MarketName,string>)[key];
+const percent=(p:number)=>"%"+(100*p).toFixed(1).replace(".",",");
+const money=(n:number)=>n.toLocaleString("tr-TR",{style:"currency",currency:"TRY"});
+const localDate=(s:string)=>{
+ const parts=new Intl.DateTimeFormat("en-CA",{timeZone:"Europe/Istanbul",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date(s));
+ const v=(key:string)=>parts.find(x=>x.type===key)?.value||"";
+ return v("year")+"-"+v("month")+"-"+v("day");
 };
-type MarketChoice = "TUMU" | "ALT" | "UST";
-
-const pct = (p: number) => "%"+(p * 100).toFixed(1).replace(".", ",");
-const dec = (v: number) => v.toFixed(2).replace(".", ",");
-const day = (s: string | Date) => {
-  const parts=new Intl.DateTimeFormat("en-CA", {
-    timeZone:"Europe/Istanbul",year:"numeric",month:"2-digit",day:"2-digit",
-  }).formatToParts(new Date(s));
-  const field=(type:string)=>parts.find(p=>p.type===type)?.value||"";
-  return `${field("year")}-${field("month")}-${field("day")}`;
-};
-const tomorrow = () => day(new Date(Date.now() + 86_400_000));
-const formatTime = (s: string) => new Intl.DateTimeFormat("tr-TR",{
-  timeZone:"Europe/Istanbul", hour:"2-digit", minute:"2-digit",
-}).format(new Date(s));
-const selectionLabel = (p: {market:number;selection:string}) =>
-  p.market.toFixed(1).replace(".", ",")+" "+(p.selection === "UST" ? "Üst" : "Alt");
-
-function poissonUnder(market: number, lambda: number): number {
-  if (!Number.isFinite(lambda) || lambda < 0) return 0.5;
-  const lastGoal = Math.floor(market);
-  let term = Math.exp(-lambda), sum = term;
-  for(let i = 1; i <= lastGoal; i++) {term *= lambda / i; sum += term;}
-  return Math.min(1, Math.max(0,sum));
-}
-
-function simulate(probabilities: number[], count = 10000) {
-  // Reproducible independent-event simulations. Not a separate model.
-  let seed = 0x4a39b70d;
-  let wins = 0;
-  for (let i = 0; i < count; i++) {
-    let successful = true;
-    for (const p of probabilities) {
-      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-      if (seed / 4294967296 >= p) successful = false;
-    }
-    if(successful) wins++;
-  }
-  return wins;
-}
-
-export default function SmartCouponsPage() {
-  const [data,setData] = useState<Data|null>(null);
-  const [error,setError] = useState("");
-  const [date,setDate] = useState("");
-  const attemptedFirstImport=useRef(false);
-  const attemptedFirstHistory=useRef(false);
-  const [count,setCount] = useState(5);
-  const [quality,setQuality] = useState(0.65);
-  const [choice,setChoice] = useState<MarketChoice>("TUMU");
-  const [league,setLeague] = useState("ALL");
-  const [kickoffTime,setKickoffTime] = useState("AUTO");
-  const [refreshing,setRefreshing] = useState(false);
-  const [refreshMessage,setRefreshMessage] = useState("");
-  const [loadingHistory,setLoadingHistory] = useState(false);
-  const [historyCoverage,setHistoryCoverage] = useState<Array<{competition_code:string;played:number;complete_goals:number;detailed_stats:number}>>([]);
-  const [historyProgress,setHistoryProgress] = useState<Array<{competition_code:string;provider:string;last_status:string;matches_processed:number;goal_sets_processed:number;last_error:string|null}>>([]);
-  const [odds,setOdds] = useState<Record<number,string>>({});
-  const [stake,setStake] = useState("");
-  const [showAll,setShowAll] = useState(false);
-  const [refresh,setRefresh] = useState(0);
-  useEffect(() => {
-    const abort = new AbortController();
-    fetch("/api/dashboard?days=31",{cache:"no-store",signal:abort.signal})
-      .then(async r=>{if(!r.ok)throw Error("Veri havuzuna erişilemiyor.");return r.json() as Promise<Data>;})
-      .then(setData).catch((e: unknown)=>{
-        if(!abort.signal.aborted) setError(e instanceof Error ? e.message : "Veri yüklenemedi.");
-      });
-    return ()=>abort.abort();
-  },[refresh]);
-  useEffect(()=>{
-    const controller=new AbortController();
-    fetch("/api/history-status",{cache:"no-store",signal:controller.signal})
-      .then(async r=>{if(!r.ok)throw Error("Geçmiş veri durumu alınamadı");return r.json();})
-      .then((payload:{coverage?:typeof historyCoverage;progress?:typeof historyProgress})=>{
-        setHistoryCoverage(payload.coverage||[]);
-        setHistoryProgress(payload.progress||[]);
-      }).catch(()=>{});
-    return()=>controller.abort();
-  },[refresh]);
-
-  async function updateHistory(){
-    setLoadingHistory(true);
-    setRefreshMessage("");
-    try{
-      const response=await fetch("/api/history-backfill",{
-        method:"POST",cache:"no-store",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({league:league==="ALL"?undefined:league}),
-      });
-      const payload=await response.json() as {
-        ok?:boolean;error?:string;skipped?:boolean;
-        history?:{ok?:boolean;league?:string;stored?:number;goalsSaved?:number;error?:string};
-        detail?:{statsSaved?:number;goalSetsSaved?:number}
-      };
-      if(!response.ok||!payload.ok)throw Error(payload.error||"Geçmiş veriler yüklenemedi.");
-      setRefreshMessage(payload.skipped
-        ?"Yakın zamanda başlatılan geçmiş veri kontrolü zaten çalıştı."
-        : `Tarihçe: ${payload.history?.league||"—"} · ${payload.history?.stored||0} maç · ${payload.history?.goalsSaved||0} doğrulanmış gol olayı seti · ${payload.detail?.statsSaved||0} ayrıntılı maç istatistiği. ${payload.history?.error||""}`);
-    }catch(e){setRefreshMessage(e instanceof Error?e.message:"Geçmiş veri işlemi başarısız.");}
-    finally{setLoadingHistory(false);setRefresh(x=>x+1);}
-  }
-  useEffect(()=>{
-    if(!data||attemptedFirstHistory.current)return;
-    attemptedFirstHistory.current=true;
-    const upcoming=data.fixtures.filter(f=>{
-      const start=Date.parse(f.kickoff_utc);
-      return ["TIMED","SCHEDULED"].includes(f.status)
-        && start>Date.now() && start<Date.now()+7*86_400_000;
-    });
-    if(upcoming.length>0 && upcoming.every(f=>f.predictions.length===0)){
-      void updateHistory();
-    }
-  },[data]);
-
-  useEffect(()=>{
-    const timer=window.setInterval(()=>setRefresh(value=>value+1),90_000);
-    return ()=>window.clearInterval(timer);
-  },[]);
-  async function refreshResults(){
-    setRefreshing(true);setRefreshMessage("");
-    try{
-      const fixtureResponse=await fetch("/api/refresh-fixtures",{method:"POST",cache:"no-store"});
-      const fixtures=await fixtureResponse.json() as {ok?:boolean;update?:{added?:number};skipped?:boolean;error?:string};
-      if(!fixtureResponse.ok||!fixtures.ok)throw Error(fixtures.error||"Fikstürler güncellenemedi.");
-      const resultResponse=await fetch("/api/refresh-results",{method:"POST",cache:"no-store"});
-      const result=await resultResponse.json() as {ok?:boolean;updated?:number;error?:string;skipped?:boolean};
-      if(!resultResponse.ok||!result.ok)throw Error(result.error||"Skorlar güncellenemedi.");
-      setRefreshMessage(`Kontrol edildi: ${fixtures.update?.added??0} yeni maç, ${result.updated??0} yeni final skor.`);
-    }catch(error){setRefreshMessage(error instanceof Error?error.message:"Güncelleme başarısız.");}
-    finally{setRefreshing(false);setRefresh(x=>x+1);}
-  }
-
-  const upcomingDays=useMemo(() =>
-    [...new Set((data?.fixtures??[]).filter(f=>
-      ["SCHEDULED","TIMED","TBC"].includes(f.status)
-      && Date.parse(f.kickoff_utc)>Date.now()
-      && (league==="ALL"||f.competition_code===league)
-    ).map(f=>day(f.kickoff_utc)))].sort().slice(0,31),
-  [data,league]);
-  const effectiveDate = date || upcomingDays[0] || tomorrow();
-  const dailyFixtures=useMemo(()=>(data?.fixtures??[]).filter(f=>
-    day(f.kickoff_utc)===effectiveDate &&
-    (league==="ALL"||f.competition_code===league) &&
-    ["SCHEDULED","TIMED","TBC"].includes(f.status) &&
-    Date.parse(f.kickoff_utc)>Date.now()
-  ),[data,effectiveDate,league]);
-  const fixtures = dailyFixtures.filter(f=>f.status!=="TBC");
-  const selectionMap = useMemo(() => new Map(fixtures.map(f=>[f.id,f])),[dailyFixtures]);
-  const available = useMemo(() => fixtures.flatMap(f=>
-    f.predictions.filter(p=>choice==="TUMU"||p.selection===choice)
-      .map(p=>({...p, fixture_id:f.id, kickoff_utc:f.kickoff_utc}))
-  ),[fixtures,choice]);
-  const ranked = useMemo(()=>rankSelections(available,quality),[available,quality]);
-  const timeGroups=useMemo(()=>{
-    const groups=new Map<string,RankedCandidate[]>();
-    for (const pick of ranked) {
-      const slot=kickoffSlot(pick.kickoff_utc);
-      if(!slot)continue;
-      const group=groups.get(slot)||[];
-      group.push(pick);
-      groups.set(slot,group);
-    }
-    return [...groups.entries()].sort((a,b)=> {
-      const av=a[1].filter(p=>p.conservative_probability>=0.62);
-      const bv=b[1].filter(p=>p.conservative_probability>=0.62);
-      const aEnough=av.length>=count, bEnough=bv.length>=count;
-      if(aEnough!==bEnough) return aEnough?-1:1;
-      if(aEnough&&bEnough) {
-        const ap=av.slice(0,count).reduce((sum,p)=>sum*p.conservative_probability,1);
-        const bp=bv.slice(0,count).reduce((sum,p)=>sum*p.conservative_probability,1);
-        if(ap!==bp) return bp-ap;
-      }
-      return bv.length-av.length || a[0].localeCompare(b[0]);
-    });
-  },[ranked,count]);
-  const selectedTime=kickoffTime==="AUTO" ? timeGroups[0]?.[0] : kickoffTime;
-  const sameTimeRanked=ranked.filter(p=>kickoffSlot(p.kickoff_utc)===selectedTime);
-  const choices = sameTimeRanked.filter(p=>p.conservative_probability>=0.62).slice(0,count);
-  const sufficient = choices.length === count;
-  const joint = sufficient ? choices.reduce((value,p)=>value*p.conservative_probability,1) : null;
-  const scenarioWins = useMemo(() => sufficient ? simulate(choices.map(p=>p.conservative_probability)):null,[choices,sufficient]);
-  const allOdds = sufficient && choices.every(p=>Number(odds[p.fixture_id])>1);
-  const totalOdds = allOdds ? choices.reduce((v,p)=>v*Number(odds[p.fixture_id]),1):null;
-  const ev = joint!==null && totalOdds!==null ? expectedValue(joint,totalOdds):null;
-  const stakeAmount = Number(stake);
-  const sourceAge = data?.lastSync?.finished_at
-    ? (Date.now()-new Date(data.lastSync.finished_at).getTime())/3600000 : Infinity;
-  const stale = data!==null && (sourceAge>72 || data.lastSync?.status==="FAILED");
-
-  useEffect(()=>{
-    if(!data||attemptedFirstImport.current)return;
-    attemptedFirstImport.current=true;
-    const upcoming=(data.fixtures??[]).filter(f=>{
-      const ms=Date.parse(f.kickoff_utc);
-      return ["TIMED","SCHEDULED","TBC"].includes(f.status)
-        && ms>Date.now() && ms<Date.now()+7*86_400_000;
-    });
-    if(upcoming.length>0)return;
-    void (async()=>{
-      setRefreshing(true);
-      setRefreshMessage("Güncel maç fikstürü otomatik kontrol ediliyor…");
-      try{
-        const response=await fetch("/api/refresh-fixtures",{method:"POST",cache:"no-store"});
-        const payload=await response.json() as {ok?:boolean;error?:string;update?:{added?:number;sources?:Array<{league:string;fetched:number;error?:string}>};skipped?:boolean};
-        if(!response.ok||!payload.ok)throw Error(payload.error||"Fikstür kaynağına ulaşılamadı.");
-        const sourceCount=(payload.update?.sources??[]).reduce((n,s)=>n+(s.fetched||0),0);
-        setRefreshMessage(payload.skipped
-          ? "Kaynaklar daha önce kontrol edilmiş. Listede maç yoksa filtreleri genişlet."
-          : `Fikstür kaynaklarında ${sourceCount} maç bulundu, ${payload.update?.added??0} yeni kayıt eklendi.`);
-        setRefresh(value=>value+1);
-      }catch(error){
-        setRefreshMessage(error instanceof Error ? error.message : "Otomatik fikstür yenileme başarısız.");
-      }finally{setRefreshing(false);}
-    })();
-  },[data]);
-
-  return <main className="mx-auto max-w-6xl px-4 py-7 md:px-8 text-[#12251a]">
-    <header className="mb-9 flex flex-wrap items-center justify-between gap-4">
-      <div>
-        <Link href="/" className="text-sm font-semibold text-[#176b45]">← Ana panele dön</Link>
-        <h1 className="mt-3 text-3xl font-bold tracking-tight md:text-5xl">Akıllı Kupon Laboratuvarı</h1>
-        <p className="mt-2 max-w-2xl text-sm text-[#566a5a]">
-          Yalnızca aynı gün ve aynı saatteki maçlarla gol olasılıkları, veri kalitesi ve kupon riskini karşılaştırır.
-        </p>
-      </div>
-      <button disabled={refreshing} className="rounded-xl border border-[#c8d6ce] bg-white px-4 py-3 text-sm font-semibold disabled:opacity-50"
-        onClick={refreshResults}>{refreshing?"Skorlar kontrol ediliyor…":"Maç ve skorları güncelle"}</button>
-    </header>
-
-    <section className="mb-5 flex flex-wrap items-center gap-3">
-      <button disabled={loadingHistory} onClick={updateHistory}
-        className="rounded-xl border border-[#b7cbbd] bg-[#176b45] px-5 py-3 text-sm font-semibold text-white disabled:opacity-50">
-        {loadingHistory?"Geçmiş maçlar doğrulanıyor…":"Geçmiş maç / gol verilerini yükle"}
-      </button>
-      <span className="text-xs text-[#566a5a]">Geçmiş veriler kademeli ve kaynaklı işlenir. Günlük otomatik yenileme de etkin.</span>
-    </section>
-    {refreshMessage && <p role="status" className="mb-4 text-sm text-[#176b45]">{refreshMessage}</p>}
-    {error && <p role="alert" className="mb-5 rounded-xl bg-red-50 p-4 text-red-800">{error}</p>}
-    {stale && <p role="alert" className="mb-5 border-l-4 border-amber-500 bg-amber-50 p-4 text-sm">
-      Son veri senkronizasyonu güncel değil veya başarısız. Tahminleri kullanmadan önce kaynakları doğrula.
+const localTime=(s:string)=>new Intl.DateTimeFormat("tr-TR",{timeZone:"Europe/Istanbul",hour:"2-digit",minute:"2-digit"}).format(new Date(s));
+const ci=(a:string,b:string)=>a.localeCompare(b,"tr");
+const goalMarkets=new Set(["O1.5","U1.5","O2.5","U2.5","O3.5","U3.5"]);
+export default function EnginePage(){
+ const [data,setData]=useState<Data|null>(null);
+ const [error,setError]=useState("");
+ const [loading,setLoading]=useState(true);
+ const [reload,setReload]=useState(0);
+ const [league,setLeague]=useState("ALL");
+ const [date,setDate]=useState("");
+ const [slot,setSlot]=useState("");
+ const [length,setLength]=useState(5);
+ const [kind,setKind]=useState("GOALS");
+ const [odds,setOdds]=useState<Record<string,string>>({});
+ const [choices,setChoices]=useState<Record<number,MarketName>>({});
+ const [stake,setStake]=useState("");
+ const [notice,setNotice]=useState("");
+ const [importing,setImporting]=useState(false);
+ const [test,setTest]=useState<TestData|null>(null);
+ const [testing,setTesting]=useState(false);
+ const [showDetails,setShowDetails]=useState<Record<number,boolean>>({});
+ const warmedUp=useRef(false);
+ const fetchData=useCallback(async()=>{
+   setLoading(true);
+   try{
+     const response=await fetch("/api/v4?days=31",{cache:"no-store"});
+     if(!response.ok)throw Error((await response.json()).error||"Analiz verileri alınamadı");
+     setData(await response.json() as Data);
+     setError("");
+   }catch(e){setError(e instanceof Error?e.message:"Veri hatası");}
+   finally{setLoading(false);}
+ },[]);
+ useEffect(()=>{void fetchData();},[fetchData,reload]);
+ useEffect(()=>{
+   if(!data||warmedUp.current)return;
+   warmedUp.current=true;
+   if(data.fixtures.length===0||data.fixtures.some(g=>g.profile.status==="READY"))return;
+   // One cautious first-load history fetch; the scheduled cron continues from saved cursors.
+   void fetch("/api/history-backfill",{
+     method:"POST",headers:{"Content-Type":"application/json"},body:"{}"
+   }).then(response=>response.ok?response.json():null).then(value=>{
+     if(value&&!value.skipped)setReload(n=>n+1);
+   }).catch(()=>{});
+ },[data]);
+ useEffect(()=>{
+  const timer=window.setInterval(()=>setReload(x=>x+1),120000);
+  return ()=>window.clearInterval(timer);
+ },[]);
+ const games=useMemo(()=>(data?.fixtures||[]).filter(g=>league==="ALL"||g.fixture.competition===league),[data,league]);
+ const dates=useMemo(()=>[...new Set(games.map(g=>localDate(g.fixture.kickoff)))].sort(),[games]);
+ const validForCoupon=(g:Game)=>g.profile.status==="READY" &&
+   Number(g.profile.quality)>=0.59 && Boolean(g.profile.markets?.some(p=>
+     (kind!=="GOALS"||goalMarkets.has(p.name)) && p.conservative>=0.62));
+ const dayScore=(d:string)=>{
+   const grouped=new Map<string,number>();
+   for(const g of games){
+     if(localDate(g.fixture.kickoff)!==d||!g.sameTimeSlot||!validForCoupon(g))continue;
+     grouped.set(g.sameTimeSlot,(grouped.get(g.sameTimeSlot)||0)+1);
+   }
+   return Math.max(0,...grouped.values());
+ };
+ const bestDate=dates.slice().sort((a,b)=>{
+   const aCount=dayScore(a),bCount=dayScore(b);
+   return Number(bCount>=length)-Number(aCount>=length)||bCount-aCount||a.localeCompare(b);
+ })[0]||"";
+ const pickedDate=(date&&dates.includes(date)?date:bestDate)||"";
+ const onDate=games.filter(g=>localDate(g.fixture.kickoff)===pickedDate);
+ const timeSlots=[...new Set(onDate.map(g=>g.sameTimeSlot).filter((x):x is string=>Boolean(x)))].sort();
+ const bestSlot=timeSlots.slice().sort((a,b)=>{
+   const av=onDate.filter(g=>g.sameTimeSlot===a&&validForCoupon(g)).length;
+   const bv=onDate.filter(g=>g.sameTimeSlot===b&&validForCoupon(g)).length;
+   return Number(bv>=length)-Number(av>=length)||bv-av||a.localeCompare(b);
+ })[0]||"";
+ const visibleSlot=slot&&timeSlots.includes(slot)?slot:bestSlot;
+ const sameTime=onDate.filter(g=>g.sameTimeSlot===visibleSlot);
+ const useful=useMemo(()=>sameTime.flatMap(g=>{
+  if(g.profile.status!=="READY"||!g.profile.markets||Number(g.profile.quality)<0.59)return [];
+  const allowed=g.profile.markets.filter(p=>kind==="GOALS"?goalMarkets.has(p.name):true);
+  const best=allowed.find(p=>p.conservative>=0.62);
+  if(!best)return [];
+  const chosen=allowed.find(p=>p.name===choices[g.fixture.id])||best;
+  return [{g,p:chosen}];
+ }).sort((a,b)=>b.p.conservative-a.p.conservative),[sameTime,kind,choices]);
+ const selected=useful.slice(0,length);
+ const complete=selected.length===length;
+ const joint=complete?selected.reduce((v,{p})=>v*p.conservative,1):null;
+ const selectedOdds=selected.map(({g,p})=>Number((odds[g.fixture.id+":"+p.name]||"").replace(",",".")));
+ const validOdds=complete&&selectedOdds.every(o=>o>1&&Number.isFinite(o));
+ const combinedOdds=validOdds?selectedOdds.reduce((v,n)=>v*n,1):null;
+ const expectedValue=joint!==null&&combinedOdds!==null?joint*combinedOdds-1:null;
+ const stakeValue=Number(stake);
+ const payment=combinedOdds!==null && stakeValue>0 && Number.isFinite(stakeValue)?combinedOdds*stakeValue:null;
+ const haveReady=games.filter(g=>g.profile.status==="READY").length;
+ async function refreshHistory(){
+  setImporting(true);setNotice("");
+  try{
+   const response=await fetch("/api/history-backfill",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({league:league==="ALL"?undefined:league})});
+   const value=await response.json() as {ok:boolean;skipped?:boolean;history?:{league?:string;scanned?:number;stored?:number;goalsSaved?:number;error?:string};error?:string};
+   if(!response.ok||!value.ok)throw Error(value.error||"Veri aktarımı başarısız");
+   setNotice(value.skipped?"Veri aktarımı yakın zamanda kontrol edilmiş.":
+     "Kaynak: "+(value.history?.league||"otomatik")+" · taranan "+(value.history?.scanned||0)+
+     " maç · kaydedilen "+(value.history?.stored||0)+
+     (value.history?.error?" · hata: "+value.history.error:""));
+   setReload(x=>x+1);
+  }catch(e){setNotice(e instanceof Error?e.message:"Veri alınamadı");}
+  finally{setImporting(false);}
+ }
+ async function runBacktest(){
+  setTesting(true);setTest(null);
+  try{
+   const response=await fetch("/api/v4/backtest?league="+encodeURIComponent(league),{cache:"no-store"});
+   if(!response.ok)throw Error("Geriye dönük test başarısız.");
+   setTest(await response.json() as TestData);
+  }catch(e){setNotice(e instanceof Error?e.message:"Backtest hatası");}
+  finally{setTesting(false);}
+ }
+ return <main className="mx-auto max-w-7xl px-4 py-7 text-[#142b23] md:px-7">
+  <header className="flex flex-wrap items-start justify-between gap-4">
+   <div>
+    <Link href="/" className="text-sm font-semibold text-[#176b45]">← Ana sayfa</Link>
+    <div className="mt-3 text-xs font-extrabold uppercase tracking-[0.2em] text-[#176b45]">İstatistiksel karar laboratuvarı</div>
+    <h1 className="mt-1 text-3xl font-bold tracking-tight md:text-5xl">Kupon Motoru V4</h1>
+    <p className="mt-3 max-w-3xl text-sm text-[#65786f]">
+     Tamamen yeni skor modeli · her maçta 10.000 simülasyon · geçmiş sonuçlarla test · aynı tarih ve aynı saat.
+     Kesin sonuç veya yüksek isabet garantisi yoktur.
+    </p>
+   </div>
+   <div className="flex flex-wrap gap-2">
+    <button type="button" disabled={importing} onClick={refreshHistory}
+      className="rounded-xl border border-[#ccd8d1] bg-white px-4 py-3 text-sm font-semibold disabled:opacity-50">
+     {importing?"Veriler doğrulanıyor…":"Geçmiş maçları yenile"}
+    </button>
+    <button type="button" onClick={()=>setReload(x=>x+1)}
+      className="rounded-xl bg-[#176b45] px-4 py-3 text-sm font-semibold text-white">Modeli yeniden hesapla</button>
+   </div>
+  </header>
+  {notice&&<p role="status" className="my-5 rounded-xl bg-[#e5f1e8] p-4 text-sm">{notice}</p>}
+  {error&&<p role="alert" className="my-5 rounded-xl bg-red-50 p-4 text-sm text-red-800">{error}</p>}
+  <div className="mt-6 grid grid-cols-2 gap-3 md:grid-cols-4">
+   {[
+     ["Gelecek maç",data?.fixtures.length??"—"],
+     ["Modeli hazır",data?.fixtures.filter(g=>g.profile.status==="READY").length??"—"],
+     ["Verisi yetersiz",data?.fixtures.filter(g=>g.profile.status!=="READY").length??"—"],
+     ["Simülasyon", "10.000 / maç"],
+   ].map(([k,v])=><div className="rounded-xl border border-[#dbe5dd] bg-white p-4" key={k}>
+    <div className="text-xs text-[#708076]">{k}</div>
+    <div className="mt-2 text-2xl font-extrabold">{v}</div>
+   </div>)}
+  </div>
+  <section className="mt-5 grid gap-3 rounded-2xl border border-[#dbe5dd] bg-white p-4 md:grid-cols-5">
+   <label className="grid gap-2 text-xs font-semibold">Lig
+    <select value={league} onChange={e=>{setLeague(e.target.value);setDate("");setSlot("");setTest(null);}}
+     className="rounded-lg border border-[#ccd8d1] bg-white p-3 text-sm">
+     <option value="ALL">Tüm ligler</option>
+     {Object.keys(names).sort(ci).map(k=><option key={k} value={k}>{names[k]}</option>)}
+    </select>
+   </label>
+   <label className="grid gap-2 text-xs font-semibold">Maç günü
+    <select value={pickedDate} onChange={e=>{setDate(e.target.value);setSlot("");}}
+      className="rounded-lg border border-[#ccd8d1] bg-white p-3 text-sm">
+      {dates.length===0&&<option value="">Fikstür yok</option>}
+      {dates.map(k=><option key={k} value={k}>{k}</option>)}
+    </select>
+   </label>
+   <label className="grid gap-2 text-xs font-semibold">Aynı başlama saati (TR)
+    <select value={visibleSlot} onChange={e=>setSlot(e.target.value)}
+      className="rounded-lg border border-[#ccd8d1] bg-white p-3 text-sm">
+      {timeSlots.length===0&&<option value="">Saat bulunamadı</option>}
+      {timeSlots.map(k=><option key={k} value={k}>{k.slice(11)} · {onDate.filter(g=>g.sameTimeSlot===k).length} maç</option>)}
+    </select>
+   </label>
+   <label className="grid gap-2 text-xs font-semibold">Piyasa
+    <select value={kind} onChange={e=>setKind(e.target.value)}
+     className="rounded-lg border border-[#ccd8d1] bg-white p-3 text-sm">
+     <option value="GOALS">Alt / Üst</option><option value="ALL">Bütün piyasalar</option>
+    </select>
+   </label>
+   <label className="grid gap-2 text-xs font-semibold">Kupon uzunluğu
+    <select value={length} onChange={e=>setLength(Number(e.target.value))}
+      className="rounded-lg border border-[#ccd8d1] bg-white p-3 text-sm">
+     {[2,3,4,5,6].map(n=><option key={n} value={n}>{n} maç</option>)}
+    </select>
+   </label>
+  </section>
+  <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1.65fr)_minmax(290px,1fr)]">
+   <section className="rounded-2xl border border-[#dbe5dd] bg-white p-4 md:p-6">
+    <h2 className="text-xl font-bold">Modelin aynı saat kuponu</h2>
+    <p className="mt-1 text-xs text-[#65786f]">{pickedDate||"Tarih yok"} · {visibleSlot?visibleSlot.slice(11)+" Türkiye saati":"Maç saati bulunamadı"} · Seçimler geçmiş veriye göre sıralanır.</p>
+    {loading&&!data&&<p role="status" className="py-6">Maç geçmişi hesaplanıyor…</p>}
+    {data&&!complete&&<p className="mt-4 rounded-xl bg-[#f5f1e7] p-4 text-sm">
+      Bu saat için {length} yeterli veri ve risk eşiğine sahip karşılaşma bulunamadı.
+      {useful.length>0?" İncelenebilen maç sayısı: "+useful.length+".":""}
+      Farklı saat, gün veya daha az maç seçebilirsin; eksik maç otomatik eklenmez.
     </p>}
-    <section className="mb-6 grid gap-4 rounded-2xl border border-[#dce2dc] bg-white p-5 md:grid-cols-3 xl:grid-cols-6" aria-label="Analiz tercihleri">
-      <label className="grid gap-2 text-sm font-semibold">Maç tarihi
-        <input type="date" value={effectiveDate} min={day(new Date())} onChange={e=>{setDate(e.target.value);setKickoffTime("AUTO");}}
-          className="w-full rounded-lg border border-[#c8d6ce] p-3"/>
-      </label>
-      <label className="grid gap-2 text-sm font-semibold">Kupondaki maç sayısı
-        <select value={count} onChange={e=>setCount(Number(e.target.value))}
-          className="rounded-lg border border-[#c8d6ce] p-3">
-          {[2,3,4,5,6].map(n=><option key={n} value={n}>{n} maç</option>)}
+    <div className="mt-4 space-y-3">
+     {selected.map(({g,p})=><article key={g.fixture.id} className="rounded-xl border border-[#e1e9e3] p-4">
+      <div className="flex items-start justify-between gap-4">
+       <div className="min-w-0">
+        <p className="text-xs text-[#677a6f]">{names[g.fixture.competition]||g.fixture.competition} · {localTime(g.fixture.kickoff)}</p>
+        <p className="mt-1 font-bold">
+         <Link className="underline decoration-[#b6c7b9]" href={"/takim/"+g.fixture.homeId}>{g.fixture.homeName}</Link>
+         {" – "}
+         <Link className="underline decoration-[#b6c7b9]" href={"/takim/"+g.fixture.awayId}>{g.fixture.awayName}</Link>
+        </p>
+       </div>
+       <div className="text-right"><div className="text-xl font-extrabold">{percent(p.conservative)}</div>
+        <div className="text-[11px] text-[#677a6f]">Temkinli model</div>
+       </div>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+       <label className="flex items-center gap-2 text-xs font-semibold">Seçim
+        <select className="rounded-lg border border-[#cbd8cf] p-2" value={p.name}
+         onChange={e=>setChoices(old=>({...old,[g.fixture.id]:e.target.value as MarketName}))}>
+         {markets.filter(name=>kind!=="GOALS"||goalMarkets.has(name))
+           .map(name=><option key={name} value={name}>{label(name)}</option>)}
         </select>
-      </label>
-      <label className="grid gap-2 text-sm font-semibold">Lig seçimi
-        <select value={league} onChange={e=>{setLeague(e.target.value);setDate("");setKickoffTime("AUTO");}}
-          className="rounded-lg border border-[#c8d6ce] p-3">
-          {[
-            ["ALL","Tüm ligler"],["TSL","Türkiye Süper Lig"],["T1","Türkiye 1. Lig"],
-            ["T2","Türkiye 2. Lig"],["T3","Türkiye 3. Lig"],
-            ["BL","Almanya Bundesliga"],["BL2","Almanya 2. Bundesliga"],["BL3","Almanya 3. Liga"],["SA","İtalya Serie A"],
-            ["PL","İngiltere Premier Lig"],["LL","İspanya La Liga"],
-            ["CL","Şampiyonlar Ligi"],["EL","Avrupa Ligi"],["ECL","Konferans Ligi"],
-          ].map(([id,title])=><option key={id} value={id}>{title}</option>)}
-        </select>
-      </label>
-      <label className="grid gap-2 text-sm font-semibold">Gol tercihi
-        <select value={choice} onChange={e=>setChoice(e.target.value as MarketChoice)}
-          className="rounded-lg border border-[#c8d6ce] p-3">
-          <option value="TUMU">Alt ve üst</option><option value="UST">Yalnızca üst</option><option value="ALT">Yalnızca alt</option>
-        </select>
-      </label>
-      <label className="grid gap-2 text-sm font-semibold">Başlama saati (Türkiye)
-        <select value={kickoffTime} onChange={e=>setKickoffTime(e.target.value)}
-          className="rounded-lg border border-[#c8d6ce] p-3">
-          <option value="AUTO">Otomatik: en güçlü saat</option>
-          {timeGroups.map(([slot,matches])=><option key={slot} value={slot}>{slot.slice(11)} · {matches.length} maç</option>)}
-        </select>
-      </label>
-      <label className="grid gap-2 text-sm font-semibold">Asgari veri kalitesi
-        <select value={quality} onChange={e=>setQuality(Number(e.target.value))}
-          className="rounded-lg border border-[#c8d6ce] p-3">
-          <option value={0.6}>%60</option><option value={0.65}>%65 (önerilen)</option><option value={0.75}>%75</option><option value={0.85}>%85</option>
-        </select>
-      </label>
-    </section>
-    <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-4">
-      {[
-        ["O günkü maç",String(dailyFixtures.length)],
-        ["Analizi bulunan",String(dailyFixtures.filter(f=>f.predictions.length>0).length)],
-        ["Filtreyi geçen",String(ranked.length)],
-        ["Son güncelleme",data?.lastSync?.finished_at?new Date(data.lastSync.finished_at).toLocaleString("tr-TR",{timeZone:"Europe/Istanbul"}):"Bekleniyor"],
-      ].map(([label,value])=><div key={label} className="rounded-xl border border-[#dce2dc] bg-white p-4">
-        <div className="text-xs text-[#566a5a]">{label}</div>
-        <div className="mt-2 text-lg font-bold">{value}</div>
-      </div>)}
+       </label>
+       <label className="flex items-center gap-2 text-xs font-semibold">Gerçek bahis oranı
+        <input type="text" inputMode="decimal" placeholder="Örn. 1,42"
+         value={odds[g.fixture.id+":"+p.name]||""}
+         onChange={e=>setOdds(old=>({...old,[g.fixture.id+":"+p.name]:e.target.value}))}
+         className="w-24 rounded-lg border border-[#cbd8cf] p-2"/>
+       </label>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-3 border-t border-[#e1e9e3] pt-3 text-xs text-[#586f60]">
+       <span>Ham model {percent(p.probability)}</span>
+       <span>Veri kapsamı puanı {percent(g.profile.quality??0)}</span>
+       <span>Beklenen gol {(g.profile.lambdaHome??0).toFixed(2)} – {(g.profile.lambdaAway??0).toFixed(2)}</span>
+      </div>
+     </article>)}
     </div>
-
-    {historyCoverage.length>0 && <section className="mb-5 rounded-2xl border border-[#dce2dc] bg-white p-5">
-      <h2 className="text-lg font-bold">Liglerde yüklenen gerçek veri kapsamı</h2>
-      <p className="mt-1 text-xs text-[#566a5a]">Sayılar tamamlanan maçlara aittir; ayrıntılı veri her sağlayıcıda bulunmayabilir.</p>
-      <div className="mt-3 grid gap-2 md:grid-cols-2">
-        {historyCoverage.map(row=><div key={row.competition_code} className="flex justify-between gap-3 border-b border-[#edf0eb] py-2 text-sm">
-          <strong>{row.competition_code}</strong>
-          <span>{row.played} sonuç · {row.complete_goals||0} gol dakika seti · {row.detailed_stats||0} istatistik</span>
-        </div>)}
-      </div>
-      {historyProgress.filter(x=>x.last_status==="FAILED").length>0&&<p className="mt-2 text-xs text-amber-800">Bazı sağlayıcılar hata verdi; veriler tamamlanmamış olabilir.</p>}
-    </section>}
-    <section className="mb-6 rounded-2xl border border-[#dce2dc] bg-white p-5">
-      <div className="mb-4">
-        <h2 className="text-xl font-bold">Maç fikstürü · {effectiveDate}</h2>
-        <p className="mt-1 text-sm text-[#566a5a]">Tahmini hazır olmasa bile doğrulanmış bütün maçları listeler. Kupon için sadece aynı gün ve aynı saatte başlayan, veri kalitesi yeterli maçlar seçilir.</p>
-      </div>
-      <div className="mb-4 flex flex-wrap gap-2">
-        {upcomingDays.slice(0,14).map(key=><button type="button" key={key}
-          onClick={()=>{setDate(key);setKickoffTime("AUTO");}}
-          className={`rounded-lg border px-3 py-2 text-sm ${effectiveDate===key?"border-[#176b45] bg-[#e2efe5] font-bold":"border-[#dce2dc]"}`}>
-          {key}{effectiveDate===key?" · Seçili":""}
-        </button>)}
-      </div>
-      {!data && !error && <p role="status" className="py-3">Fikstür yükleniyor…</p>}
-      {data && dailyFixtures.length===0 && <p className="rounded-xl bg-[#f0f3ed] p-4 text-sm">
-        {upcomingDays.length
-          ? "Bu tarihte maç bulunamadı. Yukarıdaki maç bulunan günlerden birini seç."
-          : "Önümüzdeki 31 gün için doğrulanmış maç verisi henüz yok. Kaynakları yeniden güncelle; son denetim mesajını kontrol et."}
-      </p>}
-      <div className="divide-y divide-[#e7ece7]">
-        {dailyFixtures.slice(0,showAll?200:40).map(f=><div key={f.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
-          <div>
-            <strong className="text-sm"><Link href={"/takim/"+f.home_team_id} className="underline decoration-[#b4c6b6]">{f.home_team}</Link> – <Link href={"/takim/"+f.away_team_id} className="underline decoration-[#b4c6b6]">{f.away_team}</Link></strong>
-            <div className="mt-1 text-xs text-[#566a5a]">{f.competition}</div>
-          </div>
-          <div className="text-right">
-            <div className="text-sm font-semibold">{f.status==="TBC"?"Saat onaylanmadı":formatTime(f.kickoff_utc)}</div>
-            <div className="text-xs text-[#566a5a]">{f.predictions.length?"Analiz mevcut":"Geçmiş maç verisi / örneklem kontrol ediliyor"}</div>
-          </div>
-        </div>)}
-      </div>
+   </section>
+   <aside className="space-y-4">
+    <section className="rounded-2xl bg-[#123a2b] p-5 text-white">
+     <h2 className="text-lg font-bold">Kupon risk analizi</h2>
+     <p className="mt-4 text-xs text-[#b6d2c2]">Bütün maçların birlikte gelme ihtimali</p>
+     <div className="mt-1 text-5xl font-black">{joint===null?"—":percent(joint)}</div>
+     <div className="mt-4 h-3 overflow-hidden rounded-full bg-[#2f6650]">
+      <div className="h-full bg-[#dbed8a]" style={{width:((joint||0)*100)+"%"}}/>
+     </div>
+     <p className="mt-3 text-xs text-[#c6dccf]">
+      {joint===null?"Geçerli kupon oluşturulmadı.": "Bağımsız maç varsayımıyla kaybetme olasılığı "+percent(1-joint)+". Tahmin hataları birlikte ortaya çıkabilir."}
+     </p>
     </section>
-
-    <div className="grid gap-6 lg:grid-cols-[1.55fr_1fr]">
-      <section className="rounded-2xl border border-[#dce2dc] bg-white p-5">
-        <div className="mb-5">
-          <h2 className="text-2xl font-bold">Seçilen kupon {selectedTime?"· "+selectedTime.slice(11):""}</h2>
-          <p className="mt-1 text-sm text-[#566a5a]">Her maçtan yalnızca bir gol bahsi seçilir. Olasılıklara veri eksikliği indirimi uygulanır.</p>
-        </div>
-        {!data && !error && <p role="status">Güncel maçlar yükleniyor…</p>}
-        {data && !sufficient && <div className="rounded-xl bg-[#f0f3ed] p-5">
-          <strong>Güvenilir kupon oluşturulamadı.</strong>
-          <p className="mt-1 text-sm">Aynı gün ve aynı başlama saatinde {count} yeterli kaliteli maç bulunamadı. Farklı saatten maç eklenmez. Saati veya maç sayısını değiştirebilirsin.</p>
-        </div>}
-        {sufficient && <div className="space-y-3">
-          {choices.map((p,index)=>{
-            const f = selectionMap.get(p.fixture_id);
-            if(!f) return null;
-            return <article key={p.fixture_id} className="rounded-xl border border-[#dce2dc] p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <span className="text-xs text-[#566a5a]">{index+1}. {f.competition} · {formatTime(f.kickoff_utc)}</span>
-                  <h3 className="mt-1 font-bold"><Link href={"/takim/"+f.home_team_id} className="underline">{f.home_team}</Link> – <Link href={"/takim/"+f.away_team_id} className="underline">{f.away_team}</Link></h3>
-                  <div className="mt-1 text-sm text-[#176b45]">{selectionLabel(p)} · Veri kalitesi {pct(p.data_quality)}</div>
-                </div>
-                <div className="text-right"><strong className="text-xl">{pct(p.conservative_probability)}</strong>
-                  <div className="text-xs text-[#566a5a]">Temkinli tahmin</div>
-                </div>
-              </div>
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-[#e7ece7] pt-3">
-                <span className="text-xs text-[#566a5a]">Ham/kalibre edilmiş model: {pct(p.probability)} · Veri kapsamı: {pct(p.stats_coverage)}</span>
-                <label className="flex items-center gap-2 text-xs font-semibold">Bilyoner oranı
-                  <input type="number" inputMode="decimal" step="0.01" min="1.01" placeholder="Örn. 1.35"
-                    aria-label={f.home_team+" – "+f.away_team+" bahis oranı"}
-                    value={odds[p.fixture_id]??""}
-                    onChange={e=>setOdds(old=>({...old,[p.fixture_id]:e.target.value}))}
-                    className="w-28 rounded-lg border border-[#c8d6ce] p-2"/>
-                </label>
-              </div>
-            </article>;
-          })}
-        </div>}
-      </section>
-
-      <aside className="space-y-4">
-        <div className="rounded-2xl bg-[#176b45] p-6 text-white">
-          <h2 className="text-xl font-bold">Toplam risk analizi</h2>
-          <div className="mt-5 text-sm text-[#d3eee0]">Hepsinin gerçekleşme olasılığı</div>
-          <div className="mt-1 text-5xl font-bold">{joint===null?"—":pct(joint)}</div>
-          <div className="mt-4 h-3 overflow-hidden rounded-full bg-[#315c45]">
-            <div className="h-full bg-[#dff36b]" style={{width: ((joint??0)*100)+"%"}}/>
-          </div>
-          <div className="mt-4 text-sm">
-            {joint===null?"Eksik veri nedeniyle risk hesaplanamadı.":
-              `10.000 bağımsız senaryoda yaklaşık ${scenarioWins?.toLocaleString("tr-TR")} tam isabet. Kuponun kaybetme tahmini ${pct(1-joint)}.`}
-          </div>
-          <p className="mt-3 text-xs text-[#d3eee0]">Simülasyon olasılığı doğrulamaz; aynı modelin tekrar örneklenmesidir. Maçlar bağımsız varsayılmıştır.</p>
-        </div>
-        <div className="rounded-2xl border border-[#dce2dc] bg-white p-5">
-          <h2 className="text-xl font-bold">Oran ve değer karşılaştırması</h2>
-          <p className="mt-2 text-sm text-[#566a5a]">Sitede canlı bahis oranı bulunmuyor. Doğru oranları kendin girdiğinde kâr beklentisi hesaplanır.</p>
-          <dl className="mt-4 space-y-3 text-sm">
-            <div className="flex justify-between gap-4"><dt>Modelin adil toplam oranı</dt><dd className="font-bold">{joint?dec(1/joint):"—"}</dd></div>
-            <div className="flex justify-between gap-4"><dt>Girilen toplam oran</dt><dd className="font-bold">{totalOdds?dec(totalOdds):"—"}</dd></div>
-            <div className="flex justify-between gap-4"><dt>Beklenen değer (EV)</dt><dd className={ev!==null&&ev<0?"font-bold text-red-700":"font-bold text-[#176b45]"}>{ev===null?"Oran girilmeli":(ev>=0?"+":"")+pct(ev)}</dd></div>
-            <div className="flex justify-between gap-4"><dt>Piyasa başabaş ihtimali</dt><dd className="font-bold">{totalOdds?pct(1/totalOdds):"—"}</dd></div>
-          </dl>
-          <label className="mt-5 grid gap-2 text-sm font-semibold">Varsayımsal kupon bedeli (TL)
-            <input value={stake} onChange={e=>setStake(e.target.value)} type="number" min="0" step="1"
-              placeholder="Tutar girilmedi" className="rounded-lg border border-[#c8d6ce] p-3"/>
-          </label>
-          <p className="mt-3 text-sm">Tüm maçlar tutarsa brüt ödeme: <strong>{
-            totalOdds!==null && stakeAmount>0 && Number.isFinite(stakeAmount)
-              ? (totalOdds*stakeAmount).toLocaleString("tr-TR",{style:"currency",currency:"TRY"}):"—"
-          }</strong></p>
-          <p className="mt-4 text-xs text-[#566a5a]">Pozitif EV kesin kazanç değildir. Model kalibre edilmediyse EV tahmini yanıltıcı olabilir. Hiç bahis yapmamak da geçerli seçenektir.</p>
-        </div>
-      </aside>
+    <section className="rounded-2xl border border-[#dbe5dd] bg-white p-5">
+     <h2 className="text-lg font-bold">Piyasa değeri</h2>
+     <p className="mt-1 text-xs text-[#65786f]">Oranlar canlı çekilmez. Girilmediyse kârlılık tahmini yapılmaz.</p>
+     <div className="mt-4 space-y-3 text-sm">
+      <div className="flex justify-between"><span>Modelin adil oranı</span><strong>{joint?(1/joint).toFixed(2):"—"}</strong></div>
+      <div className="flex justify-between"><span>Gerçek toplam oran</span><strong>{combinedOdds?combinedOdds.toFixed(2):"—"}</strong></div>
+      <div className="flex justify-between"><span>Beklenen değer (EV)</span><strong className={expectedValue!==null&&expectedValue<0?"text-red-700":"text-[#176b45]"}>
+       {expectedValue===null?"Oran eksik":(expectedValue>0?"+":"")+percent(expectedValue)}
+      </strong></div>
+     </div>
+     <label className="mt-5 grid gap-2 text-xs font-semibold">Varsayımsal kupon tutarı (TL)
+      <input type="number" min="0" step="1" value={stake} onChange={e=>setStake(e.target.value)}
+       placeholder="Örn. 100" className="rounded-lg border border-[#cbd8cf] p-3 text-sm"/>
+     </label>
+     <p className="mt-3 text-sm">Hepsi tutarsa brüt ödeme: <strong>{payment===null?"—":money(payment)}</strong></p>
+     <p className="mt-3 text-xs text-[#65786f]">Pozitif EV garanti değildir; model geçmiş testlerde doğrulanmadan parayla risk almak için güvenilir sayılmaz.</p>
+    </section>
+   </aside>
+  </div>
+  <section className="mt-6 rounded-2xl border border-[#dbe5dd] bg-white p-5">
+   <div className="flex flex-wrap items-start justify-between gap-3">
+    <div><h2 className="text-xl font-bold">Maç bazında 10.000 skor simülasyonu</h2>
+     <p className="mt-1 text-sm text-[#63776b]">Skor, 1X2, alt/üst, KG; bütün sonuçlar aynı olasılık matrisinden gelir.</p></div>
+    <p className="text-xs text-[#63776b]">{onDate.length} maç · hazır {onDate.filter(x=>x.profile.status==="READY").length}</p>
+   </div>
+   {onDate.length===0&&<p className="mt-4 text-sm">Bu gün için fikstür bulunamadı. Tarihi veya ligi değiştir.</p>}
+   <div className="mt-4 divide-y divide-[#e8eee9]">
+    {onDate.map(g=>{
+     const isOpen=Boolean(showDetails[g.fixture.id]);
+     const p=g.profile;
+     const pm=(k:MarketName)=>p.markets?.find(m=>m.name===k);
+     return <article key={g.fixture.id} className="py-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+       <div><p className="text-xs text-[#617469]">{names[g.fixture.competition]||g.fixture.competition} · {localTime(g.fixture.kickoff)}</p>
+        <h3 className="mt-1 font-semibold">{g.fixture.homeName} – {g.fixture.awayName}</h3>
+       </div>
+       <div className="flex flex-wrap items-center gap-3">
+        {p.status==="READY"&&<span className="text-sm font-bold text-[#176b45]">2,5 Üst {percent(pm("O2.5")?.probability||0)}</span>}
+        {p.status!=="READY"&&<span className="text-xs text-[#8e6730]">Veri eksik</span>}
+        <button type="button" onClick={()=>setShowDetails(old=>({...old,[g.fixture.id]:!isOpen}))}
+         className="rounded-lg border border-[#cbd8cf] px-3 py-2 text-xs font-semibold">{isOpen?"Kapat":"Detayları aç"}</button>
+       </div>
+      </div>
+      {p.status!=="READY"&&<p className="mt-2 text-xs text-[#8e6730]">{p.reason}</p>}
+      {isOpen&&p.status==="READY"&&<div className="mt-4 space-y-4 rounded-xl bg-[#f5f8f5] p-4">
+       <p className="text-sm">Beklenen gol: <strong>{p.lambdaHome?.toFixed(2)} / {p.lambdaAway?.toFixed(2)}</strong>.
+        Örneklem: {p.samples?.home} / {p.samples?.away} takım maçı · {p.samples?.league} lig maçı.
+        {p.sources?.xg?" xG verisi de kullanıldı.":" Yeterli xG verisi yok, skor ağırlıklı model."}
+       </p>
+       <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+        {(["1","X","2","1X","X2","O1.5","O2.5","U2.5","O3.5","BTTS_Y","BTTS_N"] as MarketName[])
+         .map(key=><div key={key} className="rounded-lg border border-[#dfebe2] bg-white p-3 text-sm">
+          <div className="text-xs text-[#66796d]">{label(key)}</div>
+          <strong>{percent(pm(key)?.probability||0)}</strong>
+         </div>)}
+       </div>
+       <p className="text-xs font-semibold">En olası skorlar</p>
+       <div className="flex flex-wrap gap-2">{g.simulations?.scores.slice(0,6).map(s=>
+        <div key={s.score} className="rounded-lg bg-white px-3 py-2 text-sm">{s.score} <strong>{percent(s.count/10000)}</strong></div>)}</div>
+       <p className="text-xs text-[#65786f]">10.000 rastgele senaryo, modelin tahmini dağılımını örnekler. Tek başına doğruluk kanıtı değildir.</p>
+      </div>}
+     </article>;
+    })}
+   </div>
+  </section>
+  <section className="mt-6 rounded-2xl border border-[#dbe5dd] bg-white p-5">
+   <div className="flex flex-wrap justify-between gap-4">
+    <div><h2 className="text-xl font-bold">Gerçek doğruluk testi</h2>
+     <p className="mt-1 max-w-xl text-sm text-[#65786f]">Yalnızca test maçından önce oynanmış karşılaşmalar kullanılır. Brier skoru ne kadar düşükse o kadar iyidir.</p></div>
+    <button type="button" disabled={testing} onClick={runBacktest}
+     className="rounded-xl bg-[#123a2b] px-4 py-3 text-sm font-semibold text-white disabled:opacity-50">
+      {testing?"Geçmiş maçlarla karşılaştırılıyor…":"Geriye dönük testi çalıştır"}
+    </button>
+   </div>
+   {test&&<div className="mt-5">
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+     {[
+      ["Test maçı",String(test.total)],
+      ["Brier",test.total?test.totalBrier?.toFixed(3)||"—":"Yetersiz"],
+      ["Basit referans",test.total?test.baselineBrier?.toFixed(3)||"—":"Yetersiz"],
+      ["MS 1X2 isabeti",test.total?percent(test.winnerAccuracy??0):"Yetersiz"],
+      ["MS referans isabeti",test.total?percent(test.baselineAccuracy??0):"Yetersiz"],
+      ["2,5 alt/üst isabeti",test.total?percent(test.over25Accuracy??0):"Yetersiz"],
+      ["Ortalama log loss",test.total?test.totalLogLoss?.toFixed(3)||"—":"Yetersiz"],
+     ].map(([key,value])=><div key={key} className="rounded-xl bg-[#eff5ef] p-4">
+      <div className="text-xs text-[#65786f]">{key}</div><div className="mt-2 text-xl font-bold">{value}</div>
+     </div>)}
     </div>
-
-    <section className="mt-6 rounded-2xl border border-[#dce2dc] bg-white p-5">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div><h2 className="text-xl font-bold">Diğer maçların olasılıkları</h2>
-          <p className="mt-1 text-sm text-[#566a5a]">Kalan uygun maçlar, en yüksek temkinli olasılıktan sıralanır.</p></div>
-        <button onClick={()=>setShowAll(v=>!v)} className="rounded-xl bg-[#eef3ef] px-4 py-2 text-sm font-semibold">{showAll?"Daha az göster":"Tümünü göster"}</button>
-      </div>
-      <div className="mt-4 divide-y divide-[#e8ece8]">
-        {ranked.slice(0,showAll?100:10).map(p=>{
-          const f=selectionMap.get(p.fixture_id);if(!f)return null;
-          const lambda=f.predictions.find(pred=>pred.id===p.id)?.expected_total;
-          const alternatives = Number.isFinite(lambda)
-            ? [1.5,2.5,3.5].map(m=>({m,u:poissonUnder(m,lambda as number)})): [];
-          return <details key={p.fixture_id} className="py-3">
-            <summary className="cursor-pointer font-semibold">{f.home_team} – {f.away_team}
-              <span className="ml-3 text-sm text-[#176b45]">{selectionLabel(p)} · {pct(p.conservative_probability)}</span>
-            </summary>
-            <p className="mt-2 text-xs text-[#566a5a]">Alt ve üst için diğer sonuçların ham Poisson dağılımı (kalibrasyonsuz):</p>
-            <div className="mt-2 flex flex-wrap gap-2">{alternatives.flatMap(a=>[
-              <span key={a.m+"alt"} className="rounded-lg bg-[#eef3ef] px-3 py-2 text-xs">{a.m} Alt {pct(a.u)}</span>,
-              <span key={a.m+"ust"} className="rounded-lg bg-[#eef3ef] px-3 py-2 text-xs">{a.m} Üst {pct(1-a.u)}</span>
-            ])}</div>
-          </details>;
-        })}
-        {data && ranked.length===0 && <p className="py-4 text-sm">Bu tarihte güvenilir veri eşiğini geçen maç bulunmuyor.</p>}
-      </div>
-    </section>
-    <footer className="mt-8 text-xs text-[#566a5a]">
-      Veriler kendi havuzundan alınır. Oranlar otomatik çekilmez. Gol modeli Poisson 2.2 / kalibrasyon.
-      Veri tarihi, doğruluk ve oran avantajı ayrıca doğrulanmalıdır. Yatırılan para kaybedilebilir.
-    </footer>
-  </main>;
+    <div className="mt-3 divide-y divide-[#e7ece7]">
+     {test.leagues.map(x=><div key={x.competition} className="flex flex-wrap justify-between gap-2 py-3 text-sm">
+      <strong>{names[x.competition]||x.competition} · {x.count} maç</strong>
+      <span>{x.count?"Brier "+x.brier.toFixed(3)+" / referans "+x.baselineBrier.toFixed(3):"Test verisi yok"} · {x.validated?(x.beatsNaiveBaseline?"Referanstan iyi":"Referanstan iyi değil"):"Güvenilir örneklem yetersiz"}</span>
+     </div>)}
+    </div>
+    <p className="mt-3 text-xs text-[#677b6e]">Bu test gelecekteki sonuçları garanti etmez. Sağlayıcı kapsamı sınırlı liglerde güvenilir bir isabet oranı iddia edilmez.</p>
+   </div>}
+  </section>
+  <footer className="my-7 text-xs text-[#677b6e]">
+   Motor V4.0 · Poisson + düşük skor bağımlılığı · iç/deplasman gücü · zaman ağırlığı · veri yetersizliğinde tahmin yok.
+   Takım kadro/haber/sakatlık bilgisi doğrulanmadıkça modelde kullanılmaz. Gerçek oran olmadan değer avantajı iddia edilmez.
+  </footer>
+ </main>;
 }
