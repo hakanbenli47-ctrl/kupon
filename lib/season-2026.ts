@@ -114,6 +114,7 @@ async function plan(db:SqliteDb,onlyLeague?:string):Promise<Job[]>{
     jobs.push({provider:"ESPN",code:league.code,part:"2026-27",cursor:0,max:weeks});
   }
   for(const league of TFF_SOURCES){
+    if(onlyLeague&&onlyLeague!=="ALL"&&league.code!==onlyLeague)continue;
     const groups=await groupCodes(league).catch(()=>[]);
     if(groups.length===0){
       jobs.push({provider:"TFF",code:league.code,part:"GROUP-DISCOVERY",cursor:0,max:1});
