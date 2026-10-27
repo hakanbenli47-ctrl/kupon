@@ -597,7 +597,7 @@ export async function runAnalysis(days = 15) {
       WHERE f.status IN ('SCHEDULED','TIMED','TBC')
         AND datetime(f.kickoff_utc) >= datetime('now')
         AND datetime(f.kickoff_utc) < datetime('now', ?)
-      ORDER BY f.kickoff_utc
+      ORDER BY f.kickoff_utc LIMIT 120
     `, [`+${Math.max(1, Math.min(days, 31))} days`]) as unknown as FixtureRow[];
 
     const sourceRows=await db.all([
