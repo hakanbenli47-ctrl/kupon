@@ -158,7 +158,8 @@ async function saveFixture(db:SqliteDb,fixture:ImportedMatch) {
   return "added";
 }
 
-export async function importLeagueFixtures() {
+export async function importLeagueFixtures(maxPerLeague = 24) {
+  const perLeague=Math.max(6,Math.min(70,Math.floor(maxPerLeague)));
   const db=await getDb();
   await ensureSeedData(db);
   for(const league of [...LEAGUE_SOURCES,...TFF_SOURCES]){
@@ -167,8 +168,13 @@ export async function importLeagueFixtures() {
   }
   let added=0,updated=0,ignored=0;
   const sources: Array<{league:string;fetched:number;error?:string}>=[];
-  const maxPast=Date.now()-35*86_400_000;
+  const maxPast=Date.now()-28*86_400_000;
   const maxFuture=Date.now()+32*86_400_000;
+  const orderByRelevance=(a:ImportedMatch,b:ImportedMatch)=>{
+    const aDate=Date.parse(a.kickoff_utc), bDate=Date.parse(b.kickoff_utc);
+    const rank=(d:number)=>d>=Date.now() ? d-Date.now() : (Date.now()-d)+14*86_400_000;
+    return rank(aDate)-rank(bDate);
+  };
   // Date ranges span recent history, today and the next 31 days.
   // ESPN supports range windows, avoiding hundreds of daily requests.
   for(const league of LEAGUE_SOURCES){
@@ -182,8 +188,7 @@ export async function importLeagueFixtures() {
     }catch(error){
       sources.push({league:league.name,fetched:0,error:error instanceof Error?error.message:String(error)});
     }
-    for(const match of matches) {
-      if(Date.parse(match.kickoff_utc)<maxPast||Date.parse(match.kickoff_utc)>maxFuture)continue;
+    for(const match of matches.filter(match=>Date.parse(match.kickoff_utc)>=maxPast&&Date.parse(match.kickoff_utc)<=maxFuture).sort(orderByRelevance).slice(0,perLeague)) {
       try {
         const result=await saveFixture(db,match);
         if(result==="added")added++;else if(result==="updated")updated++;else ignored++;
@@ -197,15 +202,18 @@ export async function importLeagueFixtures() {
     ];
     const combined=new Map<string,ImportedMatch>();
     const failures:string[]=[];
-    for(const url of addresses){
-      try{
-        for(const item of parseTffRows(await requestText(url),league.code,url))
-          combined.set(item.external_id,item);
-      }catch(error){failures.push(error instanceof Error?error.message:String(error));}
+    const pages=await Promise.allSettled(addresses.map(requestText));
+    for(let index=0;index<pages.length;index++){
+      const result=pages[index];
+      if(result.status==="rejected"){
+        failures.push(result.reason instanceof Error?result.reason.message:String(result.reason));
+        continue;
+      }
+      for(const item of parseTffRows(result.value,league.code,addresses[index]))
+        combined.set(item.external_id,item);
     }
     sources.push({league:league.name,fetched:combined.size,error:failures.length?failures[0]:undefined});
-    for(const match of combined.values()){
-      if(Date.parse(match.kickoff_utc)<maxPast||Date.parse(match.kickoff_utc)>maxFuture)continue;
+    for(const match of [...combined.values()].filter(match=>Date.parse(match.kickoff_utc)>=maxPast&&Date.parse(match.kickoff_utc)<=maxFuture).sort(orderByRelevance).slice(0,perLeague)){
       try{
         const result=await saveFixture(db,match);
         if(result==="added")added++;else if(result==="updated")updated++;else ignored++;
