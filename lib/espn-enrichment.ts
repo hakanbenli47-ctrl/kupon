@@ -72,12 +72,12 @@ export async function enrichEspnMatches(limit=4){
   const db=await getDb();await ensureSeedData(db);
   const target=Math.max(1,Math.min(8,Math.floor(limit)));
   const fixtures=await db.all(
-    "SELECT f.id,f.external_id,f.competition_code,f.home_goals,f.away_goals,f.home_team_id,f.away_team_id,ht.name AS home_team,at.name AS away_team,ms.fixture_id AS has_stats,ges.is_complete AS goals_complete FROM fixtures f JOIN teams ht ON ht.id=f.home_team_id JOIN teams at ON at.id=f.away_team_id LEFT JOIN match_stats ms ON ms.fixture_id=f.id LEFT JOIN goal_event_sets ges ON ges.fixture_id=f.id WHERE f.external_id LIKE 'espn-%' AND f.status='FINISHED' AND (ms.fixture_id IS NULL OR ges.is_complete IS NULL OR ges.is_complete<>1) AND NOT EXISTS(SELECT 1 FROM fixture_stats_checks checked WHERE checked.fixture_id=f.id AND checked.provider='ESPN-DETAIL' AND checked.attempts>=3) ORDER BY f.kickoff_utc DESC LIMIT ?",[target]);
+    "SELECT f.id,f.external_id,f.competition_code,f.home_goals,f.away_goals,f.home_team_id,f.away_team_id,ht.name AS home_team,at.name AS away_team,ms.fixture_id AS has_stats,ges.is_complete AS goals_complete FROM fixtures f JOIN teams ht ON ht.id=f.home_team_id JOIN teams at ON at.id=f.away_team_id LEFT JOIN match_stats ms ON ms.fixture_id=f.id LEFT JOIN goal_event_sets ges ON ges.fixture_id=f.id WHERE f.status='FINISHED' AND (f.external_id LIKE 'espn-%' OR (f.source_name='ESPN Scoreboard' AND f.source_url LIKE '%/gameId/%')) AND (ms.fixture_id IS NULL OR ges.is_complete IS NULL OR ges.is_complete<>1) AND NOT EXISTS(SELECT 1 FROM fixture_stats_checks checked WHERE checked.fixture_id=f.id AND checked.provider='ESPN-DETAIL' AND checked.attempts>=3) ORDER BY f.kickoff_utc DESC LIMIT ?",[target]);
   let statsSaved=0,goalSetsSaved=0,checked=0;
   const errors:string[]=[];
   for(const fixture of fixtures){
     const code=String(fixture.competition_code),feed=feeds[code];
-    const matchId=String(fixture.external_id).match(/-(\d+)$/)?.[1];
+    const matchId=String(fixture.source_url||"").match(/\/gameId\/(\d+)/)?.[1] || String(fixture.external_id).match(/-(\d+)$/)?.[1];
     if(!feed||!matchId)continue;
     try{
       const url="https://site.api.espn.com/apis/site/v2/sports/soccer/"+feed+"/summary?event="+matchId;
