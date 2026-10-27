@@ -288,3 +288,17 @@ CREATE TABLE IF NOT EXISTS history_backfill_cursors (
   last_error TEXT,
   PRIMARY KEY(provider, competition_code, season)
 );
+
+-- 2026/27 fixture ingestion must persist progress across serverless invocations.
+CREATE TABLE IF NOT EXISTS season_sync_progress (
+  provider TEXT NOT NULL,
+  competition_code TEXT NOT NULL,
+  part_key TEXT NOT NULL,
+  cursor_index INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'PENDING',
+  imported INTEGER NOT NULL DEFAULT 0,
+  checked_at TEXT,
+  error TEXT,
+  PRIMARY KEY(provider, competition_code, part_key)
+);
+CREATE INDEX IF NOT EXISTS idx_season_sync_progress_state ON season_sync_progress(state,competition_code);
