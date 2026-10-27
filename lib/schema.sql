@@ -267,4 +267,9 @@ INSERT OR IGNORE INTO competitions(code, name, country) VALUES
   ('ECL', 'UEFA Konferans Ligi', 'Avrupa'),
   ('PL', 'Premier Lig', 'İngiltere'),
   ('TSL', 'Süper Lig', 'Türkiye'),
-  ('LL', 'La Liga', 'İspanya');
+  ('LL', 'La Liga', 'İspanya'),
+  ('BL', 'Bundesliga', 'Almanya'),
+  ('SA', 'Serie A', 'İtalya'),
+  ('T1', 'Trendyol 1. Lig', 'Türkiye'),
+  ('T2', 'Nesine 2. Lig', 'Türkiye'),
+  ('T3', 'Nesine 3. Lig', 'Türkiye');
