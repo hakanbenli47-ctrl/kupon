@@ -2,7 +2,9 @@ import "server-only";
 
 import { getDb, type SqliteDb } from "./db";
 import { ensureSeedData } from "./seed";
-import { runAnalysis } from "./analysis";
+import { runAnalysis, settleFinishedResults } from "./analysis";
+import { findFixtureInScoreboard, loadLeagueScoreboard, type ScoreboardMatch } from "./scoreboard-feed";
+import { importLeagueFixtures } from "./league-fixtures";
 
 type SyncFixture = {
   id: number;
@@ -320,9 +322,11 @@ async function syncFromTheSportsDb(fixture: SyncFixture): Promise<ProviderResult
   const eventId = String(match.idEvent || "");
   const homeGoals = numeric(match.intHomeScore);
   const awayGoals = numeric(match.intAwayScore);
-  const kickoffPassed = new Date(fixture.kickoff_utc).getTime() < Date.now() - 2 * 60 * 60 * 1000;
+  // Never mark a live score as final based only on elapsed wall-clock time.
+  const providerStatus = String(match.strStatus || "").trim().toLowerCase();
   const finished = homeGoals !== null && awayGoals !== null
-    && (["Match Finished", "FT", "Finished"].includes(String(match.strStatus || "")) || kickoffPassed);
+    && ["match finished", "ft", "finished", "after extra time"].includes(providerStatus)
+    && !/extra time/i.test(providerStatus);
   const result: ProviderResult = {
     sourceName: "TheSportsDB",
     sourceUrl: `https://www.thesportsdb.com/event/${eventId}`,
@@ -369,7 +373,7 @@ async function upsertMatchStats(
   checkedAt: string,
 ) {
   const values = STAT_COLUMNS.map((column) => stats[column] ?? null);
-  const assignments = STAT_COLUMNS.map((column) => `${column}=excluded.${column}`).join(",");
+  const assignments = STAT_COLUMNS.map((column) => `${column}=COALESCE(excluded.${column}, match_stats.${column})`).join(",");
   await db.run(`
       INSERT INTO match_stats(fixture_id, ${STAT_COLUMNS.join(",")}, source_url, checked_at)
       VALUES (?, ${STAT_COLUMNS.map(() => "?").join(",")}, ?, ?)
@@ -379,7 +383,7 @@ async function upsertMatchStats(
 
 async function persistResult(db: SqliteDb, fixture: SyncFixture, result: ProviderResult) {
   const checkedAt = new Date().toISOString();
-  if (!fixture.has_manual_result && result.status) {
+  if (!fixture.has_manual_result && result.status && (fixture.status !== "FINISHED" || result.status === "FINISHED")) {
     const fixtureArgs = [
       result.status,
       result.homeGoals ?? fixture.home_goals,
@@ -1011,6 +1015,113 @@ export async function runUefaStatsBackfill(batchSize = 20, analyzeWhenDone = fal
   };
 }
 
+type ScoreSyncOptions = { maxFixtures?: number; bypassCooldown?: boolean };
+
+export async function runRecentResultSync(options: ScoreSyncOptions = {}) {
+  const db = await getDb();
+  await ensureSeedData(db);
+  const maxFixtures = Math.min(40, Math.max(1, Math.floor(options.maxFixtures || 28)));
+  // Multiple requests may arrive during refresh. The lock prevents provider hammering.
+  const slot = Math.floor(Date.now() / (15 * 60_000));
+  const runKey = `result-sync-${slot}`;
+  if (!options.bypassCooldown) {
+    const lock = await db.run(
+      "INSERT OR IGNORE INTO cloud_sync_locks(run_key, started_at, status) VALUES (?, ?, 'RUNNING')",
+      [runKey, new Date().toISOString()],
+    );
+    if (!lock.changes) {
+      const existing = await db.get("SELECT status, notes FROM cloud_sync_locks WHERE run_key = ?", [runKey]);
+      return { ok: true, skipped: true, reason: "Aynı 15 dakikada veri daha önce kontrol edildi.", existing };
+    }
+  }
+
+  const started = new Date().toISOString();
+  const run = await db.run("INSERT INTO sync_runs(started_at, status, notes) VALUES (?, 'RUNNING', 'Otomatik sonuç ve maç güncellemesi')", [started]);
+  const runId = Number(run.lastInsertRowid);
+  const fixtures = await db.all(`
+    SELECT f.id, f.external_id, f.competition_code, f.kickoff_utc, f.status,
+           f.home_goals, f.away_goals, f.home_team_id, f.away_team_id,
+           ht.name AS home_team, at.name AS away_team, f.source_url,
+           CASE WHEN mr.fixture_id IS NULL THEN 0 ELSE 1 END AS has_manual_result,
+           CASE WHEN ges.is_complete = 1 THEN 1 ELSE 0 END AS has_complete_goals
+    FROM fixtures f
+    JOIN teams ht ON ht.id = f.home_team_id
+    JOIN teams at ON at.id = f.away_team_id
+    LEFT JOIN manual_fixture_results mr ON mr.fixture_id = f.id
+    LEFT JOIN goal_event_sets ges ON ges.fixture_id = f.id
+    WHERE f.status IN ('SCHEDULED','TIMED','TBC')
+      AND datetime(f.kickoff_utc) < datetime('now', '-90 minutes')
+      AND datetime(f.kickoff_utc) >= datetime('now', '-8 days')
+      AND mr.fixture_id IS NULL
+    ORDER BY f.kickoff_utc DESC LIMIT ?
+  `, [maxFixtures]) as unknown as SyncFixture[];
+
+  const boards = new Map<string, Promise<ScoreboardMatch[]>>();
+  const errors: string[] = [];
+  let updated=0, checked=0, unavailable=0;
+  try {
+    for (let i=0;i<fixtures.length;i+=5) {
+      const batch=fixtures.slice(i,i+5);
+      const found=await Promise.allSettled(batch.map(async fixture => {
+        // 90-minute cup results must come from UEFA; league scoreboards are full-time.
+        if (["CL","EL","ECL"].includes(fixture.competition_code)) return syncFromUefa(fixture);
+        const date=new Date(fixture.kickoff_utc).toISOString().slice(0,10).replace(/-/g,"");
+        const key=`${fixture.competition_code}:${date}`;
+        if (!boards.has(key)) {
+          boards.set(key,loadLeagueScoreboard(fixture.competition_code,date).catch(error=>{
+            errors.push(`${key}: ${error instanceof Error?error.message:String(error)}`.slice(0,200));
+            return [];
+          }));
+        }
+        const scoreboard=await boards.get(key)!;
+        const match=findFixtureInScoreboard(fixture,scoreboard);
+        if (match?.final && match.homeScore!==null && match.awayScore!==null) {
+          return {
+            sourceName:"ESPN League Scoreboard",
+            sourceUrl:match.sourceUrl,
+            status:"FINISHED" as const,
+            homeGoals:match.homeScore,
+            awayGoals:match.awayScore,
+          };
+        }
+        return syncFromTheSportsDb(fixture);
+      }));
+      for(let j=0;j<batch.length;j++){
+        const fixture=batch[j], result=found[j];
+        checked++;
+        if(result.status==="rejected") {
+          errors.push(`${fixture.home_team} – ${fixture.away_team}: ${result.reason instanceof Error?result.reason.message:String(result.reason)}`.slice(0,220));
+          unavailable++;
+          continue;
+        }
+        if (result.value?.status==="FINISHED"
+          && Number.isInteger(result.value.homeGoals)
+          && Number.isInteger(result.value.awayGoals)) {
+          await persistResult(db,fixture,result.value);
+          updated++;
+        } else {
+          unavailable++;
+        }
+      }
+    }
+    const settled=await settleFinishedResults();
+    const status=errors.length ? "PARTIAL":"SUCCESS";
+    const notes=JSON.stringify({checked,updated,unavailable,settled,errors:errors.slice(0,8)});
+    await db.run("UPDATE sync_runs SET finished_at=?, status=?, fixtures_updated=?, sources_checked=?, notes=? WHERE id=?",
+      [new Date().toISOString(),status,updated,checked,notes,runId]);
+    if(!options.bypassCooldown) await db.run("UPDATE cloud_sync_locks SET finished_at=?, status=?, notes=? WHERE run_key=?",
+      [new Date().toISOString(),status,notes,runKey]);
+    return {ok:true,checked,updated,unavailable,settled,errors:errors.slice(0,8)};
+  } catch(error) {
+    const message=error instanceof Error?error.message:String(error);
+    await db.run("UPDATE sync_runs SET finished_at=?, status='FAILED', notes=? WHERE id=?",
+      [new Date().toISOString(),message,runId]);
+    if(!options.bypassCooldown) await db.run("UPDATE cloud_sync_locks SET finished_at=?, status='FAILED', notes=? WHERE run_key=?",
+      [new Date().toISOString(),message,runKey]);
+    throw error;
+  }
+}
+
 export async function runDailyCloudSync() {
   const db = await getDb();
   await ensureSeedData(db);
@@ -1043,6 +1154,10 @@ export async function runDailyCloudSync() {
   let completeGoalSets = 0;
   const errors: string[] = [];
   try {
+    const domesticAndForeignFixtures = await importLeagueFixtures(8).catch((error) => ({
+      added:0,updated:0,ignored:0,sources:[],
+      error:error instanceof Error?error.message:String(error),
+    }));
     const fixtureDiscovery = await runUefaFixtureDiscovery(18, false).catch((error) => ({
       ok: false,
       error: error instanceof Error ? error.message : String(error),
@@ -1134,6 +1249,7 @@ export async function runDailyCloudSync() {
       completeGoalSets,
       errors: errors.slice(0, 6),
       fixtureDiscovery,
+      domesticAndForeignFixtures,
       historyBackfill,
       statsBackfill,
       analysis,
@@ -1152,6 +1268,7 @@ export async function runDailyCloudSync() {
       updated,
       completeGoalSets,
       fixtureDiscovery,
+      domesticAndForeignFixtures,
       historyBackfill,
       statsBackfill,
       errors: errors.slice(0, 6),

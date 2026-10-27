@@ -5,6 +5,7 @@
 export type CouponCandidate = {
   id: number;
   fixture_id: number;
+  kickoff_utc: string;
   market: number;
   selection: "ALT" | "UST";
   probability: number;
@@ -79,20 +80,50 @@ const RECIPES = [
   {size: 6, threshold: 0.63, label: "Geniş 6"},
 ] as const;
 
+/**
+ * Group only fixtures with identical official Turkish-local kickoff day and minute.
+ * Any unset / invalid kickoff is excluded rather than treated as 00:00.
+ */
+export function kickoffSlot(iso: string): string | null {
+  const time=Date.parse(iso);
+  if (!Number.isFinite(time)) return null;
+  const components=new Intl.DateTimeFormat("en-GB", {
+    timeZone:"Europe/Istanbul", year:"numeric",month:"2-digit",
+    day:"2-digit", hour:"2-digit",minute:"2-digit",hourCycle:"h23",
+  }).formatToParts(new Date(time));
+  const v=(type:string)=>components.find(part=>part.type===type)?.value;
+  const [y,m,d,h,min]=["year","month","day","hour","minute"].map(v);
+  return y&&m&&d&&h&&min ? `${y}-${m}-${d} ${h}:${min}` : null;
+}
+
 export function optimizeCouponPlans(candidates: CouponCandidate[]): CouponPlan[] {
-  const ranked = rankSelections(candidates);
-  // Missing evidence / insufficient matches is a valid outcome: no coupon.
-  return RECIPES.flatMap((recipe) => {
-    const group = ranked.filter((p) => p.conservative_probability >= recipe.threshold).slice(0, recipe.size);
-    if (group.length !== recipe.size) return [];
-    const combinedProbability = group.reduce((v, p) => v * p.conservative_probability, 1);
-    return [{
-      label: recipe.label,
-      group,
-      combinedProbability,
-      risk: combinedProbability >= 0.55 ? "DUSUK" : combinedProbability >= 0.30 ? "ORTA" : "YUKSEK",
-    }];
-  });
+  const bySlot=new Map<string,CouponCandidate[]>();
+  for (const candidate of candidates) {
+    const slot=kickoffSlot(candidate.kickoff_utc);
+    if (!slot) continue;
+    const group=bySlot.get(slot) || [];
+    group.push(candidate);
+    bySlot.set(slot,group);
+  }
+  const plans:CouponPlan[]=[];
+  for (const [slot,candidatesAtTime] of bySlot) {
+    const ranked=rankSelections(candidatesAtTime);
+    for (const recipe of RECIPES) {
+      const group=ranked
+        .filter(p=>p.conservative_probability>=recipe.threshold)
+        .slice(0,recipe.size);
+      if (group.length!==recipe.size) continue;
+      const combinedProbability=group.reduce((v,p)=>v*p.conservative_probability,1);
+      plans.push({
+        label:`${slot.slice(11)} · ${recipe.label}`,
+        group,combinedProbability,
+        risk:combinedProbability>=0.55?"DUSUK":combinedProbability>=0.30?"ORTA":"YUKSEK",
+      });
+    }
+  }
+  // Select strongest plans without forcing low-quality games or mixed kickoff times.
+  return plans.sort((a,b)=>b.combinedProbability-a.combinedProbability
+    || a.label.localeCompare(b.label)).slice(0,20);
 }
 
 export function expectedValue(probability: number, decimalOdds: number): number | null {
