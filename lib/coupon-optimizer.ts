@@ -58,8 +58,10 @@ export function rankSelections(
     if (![p.id, p.fixture_id, p.market, p.probability, p.data_quality, p.stats_coverage].every(Number.isFinite)) continue;
     if (!["ALT", "UST"].includes(p.selection)) continue;
     if (p.probability < 0.62 || p.data_quality < minimumQuality) continue;
-    if (p.stats_coverage < 0.15) continue; // Do not sell score-only games as reliable.
-    const conservative = conservativeProbability(p.probability, p.data_quality, p.stats_coverage, p.sample_home, p.sample_away);
+    // A complete history of scores is useful even when lower-league xG
+    // / shots are unavailable. Keep it, but cap confidence conservatively.
+    const base = conservativeProbability(p.probability, p.data_quality, p.stats_coverage, p.sample_home, p.sample_away);
+    const conservative = p.stats_coverage < 0.15 ? Math.min(0.67, 0.5 + (base - 0.5) * 0.8) : base;
     const evidence = evidenceScore(p.data_quality, p.stats_coverage, p.sample_home, p.sample_away);
     const next: RankedCandidate = {...p, conservative_probability: conservative, evidence_score: evidence};
     const previous = byMatch.get(p.fixture_id);
