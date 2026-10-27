@@ -33,7 +33,7 @@ function getStats(root:Record<string,unknown>,home:string,away:string){
     for(const item of r.statistics as Record<string,unknown>[]){
       const stat=statNames[canonicalTeam(item.name||item.label)];
       const value=valid(item.displayValue??item.value);
-      if(stat&&value!==null)bySide[side][stat]=value;
+      if(stat&&value!==null)bySide[side as 0|1][stat]=value;
     }
   }
   return bySide;
@@ -60,7 +60,7 @@ function getGoals(root:Record<string,unknown>,home:string,away:string,homeGoals:
     const minute=Number(minuteParts[1]),added=Number(minuteParts[2]||0);
     if(minute<1||minute>130||added>30)return null;
     const athlete=event.athlete as Record<string,unknown>|undefined;
-    output.push({id:String(event.id||"espn-"+i),side,minute,added,
+    output.push({id:String(event.id||"espn-"+i),side:side as 0|1,minute,added,
       name:typeof athlete?.displayName==="string"?athlete.displayName:null,
       own:/own.goal/i.test(tag+" "+eventText),penalty:/penalty/i.test(tag)});
   }
@@ -72,7 +72,7 @@ export async function enrichEspnMatches(limit=4){
   const db=await getDb();await ensureSeedData(db);
   const target=Math.max(1,Math.min(8,Math.floor(limit)));
   const fixtures=await db.all(
-    "SELECT f.id,f.external_id,f.competition_code,f.home_goals,f.away_goals,f.home_team_id,f.away_team_id,ht.name AS home_team,at.name AS away_team,ms.fixture_id AS has_stats,ges.is_complete AS goals_complete FROM fixtures f JOIN teams ht ON ht.id=f.home_team_id JOIN teams at ON at.id=f.away_team_id LEFT JOIN match_stats ms ON ms.fixture_id=f.id LEFT JOIN goal_event_sets ges ON ges.fixture_id=f.id WHERE f.external_id LIKE 'espn-%' AND f.status='FINISHED' AND (ms.fixture_id IS NULL OR ges.is_complete IS NULL OR ges.is_complete<>1) ORDER BY f.kickoff_utc DESC LIMIT ?",[target]);
+    "SELECT f.id,f.external_id,f.competition_code,f.home_goals,f.away_goals,f.home_team_id,f.away_team_id,ht.name AS home_team,at.name AS away_team,ms.fixture_id AS has_stats,ges.is_complete AS goals_complete FROM fixtures f JOIN teams ht ON ht.id=f.home_team_id JOIN teams at ON at.id=f.away_team_id LEFT JOIN match_stats ms ON ms.fixture_id=f.id LEFT JOIN goal_event_sets ges ON ges.fixture_id=f.id WHERE f.external_id LIKE 'espn-%' AND f.status='FINISHED' AND (ms.fixture_id IS NULL OR ges.is_complete IS NULL OR ges.is_complete<>1) AND NOT EXISTS(SELECT 1 FROM fixture_stats_checks checked WHERE checked.fixture_id=f.id AND checked.provider='ESPN-DETAIL' AND checked.attempts>=3) ORDER BY f.kickoff_utc DESC LIMIT ?",[target]);
   let statsSaved=0,goalSetsSaved=0,checked=0;
   const errors:string[]=[];
   for(const fixture of fixtures){
@@ -97,7 +97,7 @@ export async function enrichEspnMatches(limit=4){
           const sql="INSERT INTO match_stats(fixture_id,"+cols.join(",")+",source_url,checked_at) VALUES("+
             Array(cols.length+3).fill("?").join(",")+") ON CONFLICT(fixture_id) DO UPDATE SET "+assignments+
             ",source_url=excluded.source_url,checked_at=excluded.checked_at";
-          await db.run(sql,[fixture.id,...values,url,new Date().toISOString()]);
+          await db.run(sql,[Number(fixture.id),...values,url,new Date().toISOString()]);
           statsSaved++;
         }
       }
@@ -105,18 +105,24 @@ export async function enrichEspnMatches(limit=4){
         const goals=getGoals(raw,home,away,Number(fixture.home_goals),Number(fixture.away_goals));
         if(goals){
           const checkedAt=new Date().toISOString();
-          await db.run("DELETE FROM goal_events WHERE fixture_id=?",[fixture.id]);
+          await db.run("DELETE FROM goal_events WHERE fixture_id=?",[Number(fixture.id)]);
           for(const g of goals){
             await db.run("INSERT OR IGNORE INTO goal_events(fixture_id,source_event_id,scoring_team_id,minute,added_time,period,player_name,event_type,is_own_goal,is_penalty,source_url,checked_at) VALUES(?,?,?,?,?,?,?,'GOAL',?,?,?,?)",
-              [fixture.id,"espn-"+g.id,g.side===0?fixture.home_team_id:fixture.away_team_id,
+              [Number(fixture.id),"espn-"+g.id,g.side===0?Number(fixture.home_team_id):Number(fixture.away_team_id),
                 g.minute,g.added,g.minute<=45?"FIRST_HALF":"SECOND_HALF",g.name,g.own?1:0,g.penalty?1:0,url,checkedAt]);
           }
           await db.run("INSERT INTO goal_event_sets(fixture_id,event_count,is_complete,source_name,source_url,checked_at) VALUES(?,?,1,'ESPN',?,?) ON CONFLICT(fixture_id) DO UPDATE SET event_count=excluded.event_count,is_complete=1,source_name=excluded.source_name,source_url=excluded.source_url,checked_at=excluded.checked_at",
-            [fixture.id,goals.length,url,checkedAt]);
+            [Number(fixture.id),goals.length,url,checkedAt]);
           goalSetsSaved++;
         }
       }
-    }catch(error){errors.push(code+"/"+matchId+": "+(error instanceof Error?error.message:String(error)));}
+      await db.run("INSERT INTO fixture_stats_checks(fixture_id,provider,status,attempts,checked_at,notes) VALUES(?,'ESPN-DETAIL','SUCCESS',1,?,?) ON CONFLICT(fixture_id,provider) DO UPDATE SET attempts=fixture_stats_checks.attempts+1,status=excluded.status,checked_at=excluded.checked_at,notes=excluded.notes",
+        [Number(fixture.id),new Date().toISOString(),"Ayrıntılı kayıt kontrol edildi"]);
+    }catch(error){
+      errors.push(code+"/"+matchId+": "+(error instanceof Error?error.message:String(error)));
+      await db.run("INSERT INTO fixture_stats_checks(fixture_id,provider,status,attempts,checked_at,notes) VALUES(?,'ESPN-DETAIL','FAILED',1,?,?) ON CONFLICT(fixture_id,provider) DO UPDATE SET attempts=fixture_stats_checks.attempts+1,status='FAILED',checked_at=excluded.checked_at,notes=excluded.notes",
+        [Number(fixture.id),new Date().toISOString(),String(error).slice(0,220)]);
+    }
   }
   return {checked,statsSaved,goalSetsSaved,errors:errors.slice(0,5)};
 }
