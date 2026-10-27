@@ -74,10 +74,30 @@ export default function EnginePage(){
  },[]);
  const games=useMemo(()=>(data?.fixtures||[]).filter(g=>league==="ALL"||g.fixture.competition===league),[data,league]);
  const dates=useMemo(()=>[...new Set(games.map(g=>localDate(g.fixture.kickoff)))].sort(),[games]);
- const pickedDate=(date&&dates.includes(date)?date:dates[0])||"";
+ const validForCoupon=(g:Game)=>g.profile.status==="READY" &&
+   Number(g.profile.quality)>=0.59 && Boolean(g.profile.markets?.some(p=>
+     (kind!=="GOALS"||goalMarkets.has(p.name)) && p.conservative>=0.62));
+ const dayScore=(d:string)=>{
+   const grouped=new Map<string,number>();
+   for(const g of games){
+     if(localDate(g.fixture.kickoff)!==d||!g.sameTimeSlot||!validForCoupon(g))continue;
+     grouped.set(g.sameTimeSlot,(grouped.get(g.sameTimeSlot)||0)+1);
+   }
+   return Math.max(0,...grouped.values());
+ };
+ const bestDate=dates.slice().sort((a,b)=>{
+   const aCount=dayScore(a),bCount=dayScore(b);
+   return Number(bCount>=length)-Number(aCount>=length)||bCount-aCount||a.localeCompare(b);
+ })[0]||"";
+ const pickedDate=(date&&dates.includes(date)?date:bestDate)||"";
  const onDate=games.filter(g=>localDate(g.fixture.kickoff)===pickedDate);
  const timeSlots=[...new Set(onDate.map(g=>g.sameTimeSlot).filter((x):x is string=>Boolean(x)))].sort();
- const visibleSlot=slot&&timeSlots.includes(slot)?slot:timeSlots[0]||"";
+ const bestSlot=timeSlots.slice().sort((a,b)=>{
+   const av=onDate.filter(g=>g.sameTimeSlot===a&&validForCoupon(g)).length;
+   const bv=onDate.filter(g=>g.sameTimeSlot===b&&validForCoupon(g)).length;
+   return Number(bv>=length)-Number(av>=length)||bv-av||a.localeCompare(b);
+ })[0]||"";
+ const visibleSlot=slot&&timeSlots.includes(slot)?slot:bestSlot;
  const sameTime=onDate.filter(g=>g.sameTimeSlot===visibleSlot);
  const useful=useMemo(()=>sameTime.flatMap(g=>{
   if(g.profile.status!=="READY"||!g.profile.markets||Number(g.profile.quality)<0.59)return [];
@@ -230,7 +250,7 @@ export default function EnginePage(){
       </div>
       <div className="mt-3 flex flex-wrap gap-3 border-t border-[#e1e9e3] pt-3 text-xs text-[#586f60]">
        <span>Ham model {percent(p.probability)}</span>
-       <span>Veri güveni {percent(g.profile.quality??0)}</span>
+       <span>Veri kapsamı puanı {percent(g.profile.quality??0)}</span>
        <span>Beklenen gol {(g.profile.lambdaHome??0).toFixed(2)} – {(g.profile.lambdaAway??0).toFixed(2)}</span>
       </div>
      </article>)}
