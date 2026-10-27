@@ -148,7 +148,7 @@ async function importBatch(job:Job,index:number,limit:number,db:SqliteDb){
   }
   return {more,stored,goalsSaved,scanned:fixtures.length};
 }
-export async function runHistoryBackfill(limit=55){
+export async function runHistoryBackfill(limit=55,preferredLeague?:string){
   const db=await getDb();await ensureSeedData(db);
   const cap=Math.max(15,Math.min(100,Math.floor(limit)));
   const entries=await db.all("SELECT provider,competition_code,season,cursor_index,last_status,last_checked_at FROM history_backfill_cursors");
@@ -168,7 +168,7 @@ export async function runHistoryBackfill(limit=55){
         || Number(lookup.get(key(a))?.cursor_index||0)-Number(lookup.get(key(b))?.cursor_index||0)
         || a.league.localeCompare(b.league);
     });
-  const job=pending[0];
+  const job=pending.find(item=>item.league===preferredLeague)||pending[0];
   if(!job)return {ok:true,complete:true,remaining:0};
   const index=Number(lookup.get(key(job))?.cursor_index||0);
   try{
