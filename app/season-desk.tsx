@@ -1,6 +1,6 @@
 "use client";
 
-import {useCallback,useEffect,useMemo,useState} from "react";
+import {useCallback,useEffect,useMemo,useRef,useState} from "react";
 import Link from "next/link";
 
 type Screen="fixture"|"analysis"|"sources";
@@ -77,6 +77,7 @@ export default function SeasonDesk({initialView="fixture"}:{initialView?:Screen}
  const [busy,setBusy]=useState(false);
  const [loading,setLoading]=useState(false);
  const [message,setMessage]=useState("");
+ const firstImport=useRef(false);
  const [serial,setSerial]=useState(0);
  const [kickoff,setKickoff]=useState("");
  const [picks,setPicks]=useState(3);
@@ -91,6 +92,20 @@ export default function SeasonDesk({initialView="fixture"}:{initialView?:Screen}
   setCoverage(await r.json() as Coverage);
  },[]);
  useEffect(()=>{void syncView().catch(e=>setMessage(String(e)));},[serial,syncView]);
+ useEffect(()=>{
+  if(!coverage||firstImport.current)return;
+  firstImport.current=true;
+  // Bootstrap the 2026/27 archive when the initial database contains
+  // only seed fixtures. A shared three-minute lock protects provider limits.
+  const german=["BL","BL2","BL3"].some(code=>
+   !(coverage.leagues.find(l=>l.code===code)?.fixtures||0));
+  if(!german)return;
+  void fetch("/api/season/sync",{
+    method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({league:"ALL"})
+  }).then(r=>r.ok?r.json():null)
+    .then(v=>{if(v&&!v.skipped)setSerial(x=>x+1);})
+    .catch(()=>{});
+ },[coverage]);
  useEffect(()=>{
   if(view!=="fixture")return;
   let stopped=false;
@@ -159,6 +174,8 @@ export default function SeasonDesk({initialView="fixture"}:{initialView?:Screen}
  const totalOdds=full&&picked.every(p=>Number(odds[p.fixture.fixture.id])>1)
   ?picked.reduce((v,p)=>v*Number(odds[p.fixture.fixture.id]),1):null;
  const ev=totalOdds&&combined!==null?combined*totalOdds-1:null;
+ const staked=Number(stake);
+ const paid=totalOdds!==null&&Number.isFinite(staked)&&staked>0?totalOdds*staked:null;
 
  function navigate(v:Screen){
   setView(v);setKickoff("");setMessage("");setPage(1);
@@ -321,6 +338,11 @@ export default function SeasonDesk({initialView="fixture"}:{initialView?:Screen}
       <div><small>Gerçek toplam oran</small><strong>{totalOdds?totalOdds.toFixed(2):"Oran girilmeli"}</strong></div>
       <div><small>Beklenen değer (EV)</small><strong>{ev===null?"—":(ev>=0?"+":"")+pct(ev)}</strong></div>
      </div>
+     <label className="fl-stake">Varsayımsal kupon bedeli (TL)
+       <input type="number" inputMode="decimal" min="0" step="1" placeholder="Tutar gir"
+       value={stake} onChange={e=>setStake(e.target.value)}/>
+       <span>Hepsi tutarsa brüt ödeme: <strong>{paid===null?"—":paid.toLocaleString("tr-TR",{style:"currency",currency:"TRY"})}</strong></span>
+     </label>
      <div className="fl-detail-head"><h2>Tek maç analizleri</h2><p>Skor dağılımını ayrıntılı incele.</p></div>
      <div className="fl-reports">
       {(slots.find(s=>s[0]===selectedSlot)?.[1]||[]).map(g=><div className="fl-report" key={g.fixture.id}>
