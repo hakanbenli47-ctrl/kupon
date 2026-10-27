@@ -15,8 +15,8 @@ type Game={
 };
 type Data={modelVersion:string;generatedAt:string;fixtures:Game[];
  coverage:Array<{competition:string;played:number;ready:number;waiting:number;xgMatches:number}>};
-type TestData={total:number;totalBrier:number|null;baselineBrier:number|null;totalLogLoss:number|null;totalOver25Brier:number|null;leagues:Array<{
- competition:string;count:number;brier:number;baselineBrier:number;logLoss:number;over25Brier:number;validated:boolean;beatsNaiveBaseline:boolean
+type TestData={total:number;totalBrier:number|null;baselineBrier:number|null;totalLogLoss:number|null;totalOver25Brier:number|null;winnerAccuracy:number|null;baselineAccuracy:number|null;over25Accuracy:number|null;leagues:Array<{
+ competition:string;count:number;brier:number;baselineBrier:number;logLoss:number;over25Brier:number;winnerAccuracy:number;baselineAccuracy:number;over25Accuracy:number;validated:boolean;beatsNaiveBaseline:boolean
 }>};
 const names:Record<string,string>={
  TSL:"Türkiye Süper Lig",T1:"Türkiye 1. Lig",T2:"Türkiye 2. Lig",T3:"Türkiye 3. Lig",
@@ -348,6 +348,9 @@ export default function EnginePage(){
       ["Test maçı",String(test.total)],
       ["Brier",test.total?test.totalBrier?.toFixed(3)||"—":"Yetersiz"],
       ["Basit referans",test.total?test.baselineBrier?.toFixed(3)||"—":"Yetersiz"],
+      ["MS 1X2 isabeti",test.total?percent(test.winnerAccuracy??0):"Yetersiz"],
+      ["MS referans isabeti",test.total?percent(test.baselineAccuracy??0):"Yetersiz"],
+      ["2,5 alt/üst isabeti",test.total?percent(test.over25Accuracy??0):"Yetersiz"],
       ["Ortalama log loss",test.total?test.totalLogLoss?.toFixed(3)||"—":"Yetersiz"],
      ].map(([key,value])=><div key={key} className="rounded-xl bg-[#eff5ef] p-4">
       <div className="text-xs text-[#65786f]">{key}</div><div className="mt-2 text-xl font-bold">{value}</div>
