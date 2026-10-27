@@ -26,6 +26,8 @@ const leagues: Record<string,string> = {
   PL: "eng.1",
   LL: "esp.1",
   TSL: "tur.1",
+  BL: "ger.1",
+  SA: "ita.1",
 };
 const aliases: Record<string,string> = {
   "manutd":"manchesterunited",
